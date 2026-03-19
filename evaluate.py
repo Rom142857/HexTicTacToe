@@ -12,10 +12,26 @@ from bot import RandomBot
 from ai import MinimaxBot
 
 
-def play_game(bot_a, bot_b, radius=5, win_length=6):
+# Grace factor: allow 3x the time limit before counting as a violation.
+# This filters out occasional OS scheduling jitter.
+GRACE_FACTOR = 3.0
+# If a bot accumulates this many violations in a single evaluation, abort.
+MAX_VIOLATIONS = 10
+
+
+class TimeLimitExceeded(Exception):
+    """Raised when a bot consistently exceeds its time limit."""
+    def __init__(self, bot, violations):
+        self.bot = bot
+        self.violations = violations
+        super().__init__(f"{bot} exceeded time limit {violations} times")
+
+
+def play_game(bot_a, bot_b, radius=5, win_length=6, violations=None):
     """Play one game. Returns (winner, depth_counts_a, depth_counts_b).
 
     depth_counts maps depth -> number of moves at that depth.
+    violations is a dict {bot: count} tracked across games by the caller.
     """
     game = HexGame(radius=radius, win_length=win_length)
     bots = {Player.A: bot_a, Player.B: bot_b}
@@ -24,7 +40,17 @@ def play_game(bot_a, bot_b, radius=5, win_length=6):
     while not game.game_over:
         player = game.current_player
         bot = bots[player]
+
+        t0 = time.time()
         q, r = bot.get_move(game)
+        elapsed = time.time() - t0
+
+        if elapsed > bot.time_limit * GRACE_FACTOR:
+            if violations is not None:
+                violations[bot] = violations.get(bot, 0) + 1
+                if violations[bot] >= MAX_VIOLATIONS:
+                    raise TimeLimitExceeded(bot, violations[bot])
+
         depths[player][bot.last_depth] += 1
 
         if not game.make_move(q, r):
@@ -39,49 +65,63 @@ def evaluate(bot_a, bot_b, num_games=100, radius=5, win_length=6):
     bot_a_wins = 0
     bot_b_wins = 0
     draws = 0
+    games_played = 0
+    aborted = None
     # Aggregate depth counts per bot
     bot_a_depths = defaultdict(int)
     bot_b_depths = defaultdict(int)
+    violations = {}
 
     t0 = time.time()
 
     for i in range(num_games):
         swapped = i % 2 == 1
-        if swapped:
-            winner, d_seat_a, d_seat_b = play_game(bot_b, bot_a, radius, win_length)
-            # seat A = bot_b, seat B = bot_a
-            for d, c in d_seat_a.items():
-                bot_b_depths[d] += c
-            for d, c in d_seat_b.items():
-                bot_a_depths[d] += c
-            if winner == Player.A:
-                bot_b_wins += 1
-            elif winner == Player.B:
-                bot_a_wins += 1
+        try:
+            if swapped:
+                winner, d_seat_a, d_seat_b = play_game(
+                    bot_b, bot_a, radius, win_length, violations)
+                for d, c in d_seat_a.items():
+                    bot_b_depths[d] += c
+                for d, c in d_seat_b.items():
+                    bot_a_depths[d] += c
+                if winner == Player.A:
+                    bot_b_wins += 1
+                elif winner == Player.B:
+                    bot_a_wins += 1
+                else:
+                    draws += 1
             else:
-                draws += 1
-        else:
-            winner, d_seat_a, d_seat_b = play_game(bot_a, bot_b, radius, win_length)
-            for d, c in d_seat_a.items():
-                bot_a_depths[d] += c
-            for d, c in d_seat_b.items():
-                bot_b_depths[d] += c
-            if winner == Player.A:
-                bot_a_wins += 1
-            elif winner == Player.B:
-                bot_b_wins += 1
-            else:
-                draws += 1
+                winner, d_seat_a, d_seat_b = play_game(
+                    bot_a, bot_b, radius, win_length, violations)
+                for d, c in d_seat_a.items():
+                    bot_a_depths[d] += c
+                for d, c in d_seat_b.items():
+                    bot_b_depths[d] += c
+                if winner == Player.A:
+                    bot_a_wins += 1
+                elif winner == Player.B:
+                    bot_b_wins += 1
+                else:
+                    draws += 1
+        except TimeLimitExceeded as e:
+            aborted = e
+            break
+
+        games_played += 1
 
         # Progress dot every 10 games
         if (i + 1) % 10 == 0:
             print(".", end="", flush=True)
 
     elapsed = time.time() - t0
-    total = num_games
+    total = max(games_played, 1)
 
     print(f"\n\n{'='*50}")
-    print(f"  {bot_a} vs {bot_b}  —  {num_games} games in {elapsed:.1f}s")
+    if aborted:
+        print(f"  ABORTED: {aborted}")
+        print(f"  {bot_a} vs {bot_b}  —  {games_played}/{num_games} games in {elapsed:.1f}s")
+    else:
+        print(f"  {bot_a} vs {bot_b}  —  {num_games} games in {elapsed:.1f}s")
     print(f"{'='*50}")
     na, nb = str(bot_a), str(bot_b)
     print(f"  {na:>15s}: {bot_a_wins:3d} wins ({100*bot_a_wins/total:.0f}%)")
