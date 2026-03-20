@@ -4,7 +4,7 @@ This is an experiment to have the LLM autonomously improve a game-playing bot.
 
 ## Working directory
 
-You are launched from `autoresearch/`, but all game files (`ai.py`, `game.py`, `evaluate.py`, etc.) live in the parent directory. **Prefix all Bash commands with `cd .. &&`** so they execute in the right place. For example: `cd .. && python -c "..."`. File edits (Edit/Write/Read tools) use absolute paths and don't need this.
+You are launched from `autoresearch/`, but all game files (`ai.py`, `game.py`, `evaluate.py`, etc.) live in the parent directory. **Prefix `python`, `tail`, and `cp` commands with `cd .. &&`** so they execute in the right place. For example: `cd .. && python -c "..."`. **Do NOT use `cd ..` with git commands** — git works from any subdirectory automatically. File edits (Edit/Write/Read tools) use absolute paths and don't need this.
 
 ## Game rules
 
