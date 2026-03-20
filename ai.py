@@ -128,6 +128,7 @@ class MinimaxBot(Bot):
         self._hash = 0
         self._rc_stack = []
         self._history = {}
+        self._killers = {}
 
     def get_move(self, game):
         self._deadline = time.time() + self.time_limit
@@ -426,9 +427,23 @@ class MinimaxBot(Bot):
         orig_beta = beta
         candidates = list(self._cand_set)
 
-        # Move ordering: history heuristic, then TT move to front
+        # Move ordering: history heuristic, then killers, then TT move to front
         history = self._history
         candidates.sort(key=lambda m: history.get(m, 0), reverse=True)
+        # Promote killer moves toward front (after position 0 reserved for TT)
+        killers = self._killers.get(depth)
+        if killers:
+            insert_at = 0
+            cand_set = self._cand_set
+            for km in killers:
+                if km in cand_set and km != tt_move:
+                    try:
+                        idx = candidates.index(km)
+                        if idx > insert_at:
+                            candidates[insert_at], candidates[idx] = candidates[idx], candidates[insert_at]
+                            insert_at += 1
+                    except ValueError:
+                        pass
         if tt_move in self._cand_set:
             idx = candidates.index(tt_move)
             candidates[0], candidates[idx] = candidates[idx], candidates[0]
@@ -442,25 +457,28 @@ class MinimaxBot(Bot):
                 player = game.current_player
                 state = (player, game.moves_left_in_turn, game.winner, game.game_over)
                 self._make(game, q, r)
-                if i == 0:
-                    child_val = self._minimax(game, depth - 1, alpha, beta)
-                elif i >= 3 and depth >= 3:
-                    # LMR: reduced depth search
-                    child_val = self._minimax(game, depth - 2, alpha, alpha + 1)
-                    if alpha < child_val < beta:
+                # LMR: reduce depth for late moves at sufficient depth
+                if i >= 3 and depth >= 3:
+                    child_val = self._minimax(game, depth - 2, alpha, beta)
+                    if child_val > alpha:
                         child_val = self._minimax(game, depth - 1, alpha, beta)
                 else:
-                    # PVS: null window search
-                    child_val = self._minimax(game, depth - 1, alpha, alpha + 1)
-                    if alpha < child_val < beta:
-                        child_val = self._minimax(game, depth - 1, alpha, beta)
+                    child_val = self._minimax(game, depth - 1, alpha, beta)
                 self._undo(game, q, r, state, player)
                 if child_val > value:
                     value = child_val
                     best_move = (q, r)
                 alpha = max(alpha, value)
                 if alpha >= beta:
-                    history[(q, r)] = history.get((q, r), 0) + depth * depth
+                    move = (q, r)
+                    history[move] = history.get(move, 0) + depth * depth
+                    k = self._killers.get(depth)
+                    if k is None:
+                        self._killers[depth] = [move]
+                    elif move != k[0]:
+                        k.insert(0, move)
+                        if len(k) > 2:
+                            k.pop()
                     break
         else:
             value = math.inf
@@ -468,25 +486,28 @@ class MinimaxBot(Bot):
                 player = game.current_player
                 state = (player, game.moves_left_in_turn, game.winner, game.game_over)
                 self._make(game, q, r)
-                if i == 0:
-                    child_val = self._minimax(game, depth - 1, alpha, beta)
-                elif i >= 3 and depth >= 3:
-                    # LMR: reduced depth search
-                    child_val = self._minimax(game, depth - 2, beta - 1, beta)
-                    if alpha < child_val < beta:
+                # LMR: reduce depth for late moves at sufficient depth
+                if i >= 3 and depth >= 3:
+                    child_val = self._minimax(game, depth - 2, alpha, beta)
+                    if child_val < beta:
                         child_val = self._minimax(game, depth - 1, alpha, beta)
                 else:
-                    # PVS: null window search
-                    child_val = self._minimax(game, depth - 1, beta - 1, beta)
-                    if alpha < child_val < beta:
-                        child_val = self._minimax(game, depth - 1, alpha, beta)
+                    child_val = self._minimax(game, depth - 1, alpha, beta)
                 self._undo(game, q, r, state, player)
                 if child_val < value:
                     value = child_val
                     best_move = (q, r)
                 beta = min(beta, value)
                 if alpha >= beta:
-                    history[(q, r)] = history.get((q, r), 0) + depth * depth
+                    move = (q, r)
+                    history[move] = history.get(move, 0) + depth * depth
+                    k = self._killers.get(depth)
+                    if k is None:
+                        self._killers[depth] = [move]
+                    elif move != k[0]:
+                        k.insert(0, move)
+                        if len(k) > 2:
+                            k.pop()
                     break
 
         # Determine TT flag
