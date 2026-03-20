@@ -408,18 +408,16 @@ class MinimaxBot(Bot):
         orig_beta = beta
         candidates = list(self._cand_set)
 
-        # Move ordering: TT move first
+        # Move ordering: TT best move first
         if tt_move:
-            ordered = [tt_move] + [m for m in candidates if m != tt_move]
-        else:
-            ordered = candidates
+            candidates = [tt_move] + [m for m in candidates if m != tt_move]
 
         maximizing = game.current_player == self._player
         best_move = None
 
         if maximizing:
             value = -math.inf
-            for q, r in ordered:
+            for q, r in candidates:
                 player = game.current_player
                 state = game.save_state()
                 self._make(game, q, r)
@@ -433,7 +431,7 @@ class MinimaxBot(Bot):
                     break
         else:
             value = math.inf
-            for q, r in ordered:
+            for q, r in candidates:
                 player = game.current_player
                 state = game.save_state()
                 self._make(game, q, r)

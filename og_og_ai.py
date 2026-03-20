@@ -24,9 +24,7 @@ def hex_distance(dq, dr):
 
 # Scores for contiguous groups of length N (index = count)
 # Longer lines are exponentially more valuable
-LINE_SCORES = [0, 1, 10, 200, 1000, 10000, 100000]
-# Defensive multipliers per count — higher counts need more urgent blocking
-_DEF_MULT = [0, 0.8, 0.8, 1.2, 1.5, 3.0, 1.0]
+LINE_SCORES = [0, 1, 10, 100, 1000, 10000, 100000]
 
 
 # Zobrist hash table — random 64-bit values for each (cell, player) pair
@@ -133,23 +131,11 @@ def evaluate_position(game, player):
                 my_count = window.count(player)
                 opp_count = window.count(opponent)
                 if my_count > 0 and opp_count == 0:
-                    s = LINE_SCORES[my_count]
-                    # Late game: boost high-count offensive windows
-                    if my_count >= 4 and game.move_count > 6:
-                        s = int(s * 1.5)
-                    score += s
+                    score += LINE_SCORES[my_count]
                 elif opp_count > 0 and my_count == 0:
-                    s = LINE_SCORES[opp_count]
-                    if opp_count >= 4 and game.move_count > 6:
-                        s = int(s * 1.5)
-                    score -= int(s * _DEF_MULT[opp_count])
+                    score -= LINE_SCORES[opp_count]
 
     return score
-
-
-# Precomputed distance-2 offsets (18 cells, avoids hex_distance calls)
-_D2_OFFSETS = [(dq, dr) for dq in range(-2, 3) for dr in range(-2, 3)
-               if hex_distance(dq, dr) <= 2 and (dq, dr) != (0, 0)]
 
 
 def get_candidates(game):
@@ -160,10 +146,12 @@ def get_candidates(game):
 
     candidates = set()
     for q, r in occupied:
-        for dq, dr in _D2_OFFSETS:
-            nq, nr = q + dq, r + dr
-            if (nq, nr) in game.board and game.board[(nq, nr)] == Player.NONE:
-                candidates.add((nq, nr))
+        for dq in range(-2, 3):
+            for dr in range(-2, 3):
+                if hex_distance(dq, dr) <= 2:
+                    nq, nr = q + dq, r + dr
+                    if (nq, nr) in game.board and game.board[(nq, nr)] == Player.NONE:
+                        candidates.add((nq, nr))
     return list(candidates)
 
 
@@ -280,7 +268,7 @@ class MinimaxBot(Bot):
 
     def _check_time(self):
         self._nodes += 1
-        if self._nodes % 512 == 0 and time.time() >= self._deadline:
+        if self._nodes % 128 == 0 and time.time() >= self._deadline:
             raise TimeUp
 
     def _make(self, game, q, r):
