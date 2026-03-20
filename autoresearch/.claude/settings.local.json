@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c *)",
+      "Bash(python *.py*)",
+      "Bash(tail *)",
+      "Bash(cp ai.py og_ai.py)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git checkout ai.py)",
+      "Bash(git checkout -b *)",
+      "Bash(git log *)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git branch*)",
+      "Bash(uv pip:*)",
+      "Edit",
+      "Write"
+    ],
+    "deny": [
+      "Bash(git push*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean*)",
+      "Bash(rm *)"
+    ]
+  }
+}

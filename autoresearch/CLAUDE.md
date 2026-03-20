@@ -2,8 +2,6 @@
 
 This is an experiment to have the LLM autonomously improve a game-playing bot.
 
-python -c "import random; from bot import Bot, RandomBot; from game import Player; from ai import get_candidates; from evaluate import evaluate; CandidateRandomBot = type('CandidateRandomBot', (Bot,), {'get_move': lambda self, game: (setattr(self, 'last_depth', 0), random.choice(get_candidates(game)))[1]}); evaluate(CandidateRandomBot(time_limit=0.5), RandomBot(time_limit=0.5), num_games=200)"
-
 ## Game rules
 
 Hex Tic-Tac-Toe is played on a hexagonal board of radius 5 (91 cells) using axial coordinates. Two players (A and B) take turns placing stones:
@@ -25,7 +23,7 @@ To set up a new experiment, work with the user to:
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `game.py` — game rules, board representation, move/undo. **Read-only.**
    - `bot.py` — `Bot` base class and `RandomBot`. **Read-only.**
-   - `evaluate.py` — plays two bots head-to-head, reports win rates and depth stats. **Read-only.**
+   - `evaluate.py` — plays two bots head-to-head, reports win rates and depth stats. The `evaluate()` function controls the time limit for both bots via `time_limit=` (default 1s). **Read-only.**
    - `ai.py` — **the file you modify.** Contains the bot implementation (search, heuristics, candidate generation, etc).
 4. **Snapshot the champion**: Copy `ai.py` to `og_ai.py`. This is the current best bot — the one you must beat.
 5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first evaluation.
@@ -44,7 +42,7 @@ python -c "
 from ai import MinimaxBot as NewBot
 from og_ai import MinimaxBot as OldBot
 from evaluate import evaluate
-evaluate(NewBot(time_limit=0.05), OldBot(time_limit=0.05), num_games=200)
+evaluate(NewBot(), OldBot(), num_games=200, time_limit=0.05)
 " > run.log 2>&1
 ```
 
@@ -57,7 +55,7 @@ If your bot class has been renamed, adjust the import accordingly. `og_ai.py` mu
 - Modify `game.py`, `bot.py`, or `evaluate.py`. They are read-only.
 - Modify `og_ai.py` directly. It is only updated by copying `ai.py` over it when a new champion is crowned.
 - Install new packages or add dependencies.
-- Change the time limit. Both bots always get **50ms per move**.
+- Change the time limit. Both bots always get **50ms per move** (set via `evaluate(..., time_limit=0.05)`).
 
 **The goal is simple: achieve the highest win rate against the previous champion.** Everything in `ai.py` is fair game: add heuristics, change the search algorithm, improve move ordering, add an opening book, try MCTS, try neural evaluation — whatever works. The only constraint is that it runs without crashing and respects the 50ms time limit (the `Bot` base class and iterative deepening handle this).
 
