@@ -82,6 +82,16 @@ def evaluate_position(game, player):
                 elif opp_count > 0 and my_count == 0:
                     score -= int(LINE_SCORES[opp_count] * 1.2)
 
+    # Center control bonus: stones closer to center are worth more
+    for (q, r), occupant in game.board.items():
+        if occupant != Player.NONE:
+            dist = max(abs(q), abs(r), abs(-q - r))
+            bonus = 5 - dist  # center=5, edge=0
+            if occupant == player:
+                score += bonus
+            else:
+                score -= bonus
+
     return score
 
 
@@ -117,6 +127,7 @@ class MinimaxBot(Bot):
         self._player = game.current_player
         self._nodes = 0
         self.last_depth = 0
+        self._tt.clear()
 
         # Compute initial Zobrist hash from board state
         self._hash = 0
