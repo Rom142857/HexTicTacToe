@@ -1,15 +1,14 @@
-"""Minimax bot with iterative deepening and strict time limit.
+"""Minimax bot with iterative deepening, heuristic eval, and move ordering.
 
-Pure minimax with alpha-beta pruning. No heuristics — only evaluates
-terminal states as win (+1), loss (-1), or unknown (0).
-Uses iterative deepening so it always has a move ready when time expires.
+Uses alpha-beta pruning with a heuristic evaluation function that scores
+positions based on contiguous line segments along the three hex axes.
 """
 
 import math
 import random
 import time
 from bot import Bot
-from game import Player
+from game import Player, HEX_DIRECTIONS
 
 
 class TimeUp(Exception):
@@ -19,6 +18,54 @@ class TimeUp(Exception):
 def hex_distance(dq, dr):
     ds = -dq - dr
     return max(abs(dq), abs(dr), abs(ds))
+
+
+# Scores for contiguous groups of length N (index = count)
+# Longer lines are exponentially more valuable
+LINE_SCORES = [0, 1, 10, 100, 1000, 10000, 100000]
+
+
+def evaluate_position(game, player):
+    """Score the position from player's perspective.
+
+    For each line direction, scan every possible 6-cell window and count
+    how many belong to each player. A window with stones from both players
+    is dead (score 0). Otherwise score based on count.
+    """
+    opponent = Player.B if player == Player.A else Player.A
+    score = 0
+
+    # For each direction, walk all lines through the board
+    for dq, dr in HEX_DIRECTIONS:
+        # Find all starting cells: cells with no predecessor in this direction
+        visited = set()
+        for cell in game.board:
+            if cell in visited:
+                continue
+            # Walk backward to find the start of this line
+            q, r = cell
+            while (q - dq, r - dr) in game.board:
+                q -= dq
+                r -= dr
+            # Now walk forward, collecting the full line
+            line = []
+            cq, cr = q, r
+            while (cq, cr) in game.board:
+                visited.add((cq, cr))
+                line.append(game.board[(cq, cr)])
+                cq += dq
+                cr += dr
+            # Score all windows of length 6 in this line
+            for i in range(len(line) - 5):
+                window = line[i:i+6]
+                my_count = window.count(player)
+                opp_count = window.count(opponent)
+                if my_count > 0 and opp_count == 0:
+                    score += LINE_SCORES[my_count]
+                elif opp_count > 0 and my_count == 0:
+                    score -= LINE_SCORES[opp_count]
+
+    return score
 
 
 def get_candidates(game):
@@ -39,7 +86,7 @@ def get_candidates(game):
 
 
 class MinimaxBot(Bot):
-    """Iterative-deepening minimax with alpha-beta pruning."""
+    """Iterative-deepening minimax with alpha-beta pruning and heuristic eval."""
 
     def __init__(self, time_limit=0.05):
         super().__init__(time_limit)
@@ -105,12 +152,15 @@ class MinimaxBot(Bot):
     def _minimax(self, game, depth, alpha, beta):
         self._check_time()
 
-        if game.game_over or depth == 0:
+        if game.game_over:
             if game.winner == self._player:
-                return 1
+                return 100000000
             elif game.winner != Player.NONE:
-                return -1
+                return -100000000
             return 0
+
+        if depth == 0:
+            return evaluate_position(game, self._player)
 
         candidates = get_candidates(game)
         maximizing = game.current_player == self._player
