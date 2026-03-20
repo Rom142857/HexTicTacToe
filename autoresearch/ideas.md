@@ -1,33 +1,38 @@
 # Ideas for Hex Tic-Tac-Toe Bot Improvement
 
-## Priority ideas
-- [ ] Threat-space search — detect forced sequences (open 5s, double 4s, etc.)
-- [ ] Opening book — precomputed first moves (center is strong)
-- [~] Killer move heuristic / history heuristic for move ordering (IN PROGRESS)
-- [ ] MCTS approach
-- [ ] Node priors
+## Current champion config
+- LINE_SCORES: [0, 1, 10, 200, 1000, 10000, 100000]
+- _DEF_MULT: [0, 0.8, 0.8, 1.2, 1.5, 3.0, 1.0]
+- Phase-aware eval: 1.5x boost for 4+ windows when move_count > 10
+- Time check: every 512 nodes
+- Precomputed d2 offsets
+
+## Remaining ideas to try
+- [ ] Threat-space search — detect forced sequences
+- [ ] MCTS approach (radically different search)
 - [ ] Consider both stones of a turn together in search
-- [ ] Negamax refactor (simpler, fewer branches in code)
-- [ ] Tune LINE_SCORES weights (current 10x growth may be too aggressive)
-- [ ] Defensive asymmetry — weight opponent threats more than own
-- [ ] Center control bonus in eval
+- [ ] Different TT replacement policy (depth-preferred vs always-replace)
+- [ ] Null move heuristic (adapted for 2-stone turns)
 
-## Tried
-- [x] Heuristic eval (line-window scoring) — **100% win rate vs no-eval baseline, KEEP**
-- [x] Move ordering by line-neighbor heuristic — 50%, no improvement, DISCARD
-- [x] Precompute 6-cell windows — 50%, no improvement, DISCARD (marginal speedup not enough)
-- [x] Narrow candidates to distance 1 — 42%, WORSE (misses important moves)
-- [x] Transposition table (no root AB) — 50%, no improvement, DISCARD
-- [x] TT + Zobrist + root alpha-beta fix — 51%, marginal but depth 2.5→3.2, KEEP
-- [x] Precomputed windows eval (on top of TT) — 43%, WORSE despite correct values
-- [x] Incremental eval (on top of TT) — 28%, MUCH WORSE despite correct values and deeper search (4.3 vs 3.4)
+## Kept improvements (in order)
+1. Heuristic eval — 100% win rate
+2. TT + Zobrist + root AB — 51%
+3. Defensive asymmetry 1.2x — 65%
+4. Precomputed d2 offsets — 51% (simplification)
+5. Time check 512 — 77%
+6. Nonlinear _DEF_MULT — 54% (35-0 decisive)
+7. Reduced 1/2 defense to 0.8 — 70% decisive
+8. 5-in-a-row defense to 3.0 — 63% decisive
+9. 3-in-a-row score to 200 — 52% (14-0 decisive)
+10. Phase-aware eval (4+ boost in late game) — 74% decisive
 
-## Notes
-- 0.5s time limit per move (changed from 1s)
-- Board is 91 cells, branching factor can be huge — must prune aggressively
-- Connect6 literature relevant (6-in-a-row, 2 stones per turn)
-- The 2-stones-per-turn structure means threats work differently than standard connect games
-- Current champion: TT + root AB, searches avg depth ~3 at 0.5s
-- CRITICAL FINDING: Deeper search (depth 4+) HURTS with current eval function. The eval is too naive — it leads to search pathology at deeper levels. Improving eval QUALITY is more important than search speed.
-- Distance-1 candidates search deeper (3.1) but miss critical moves — need a smarter way to narrow, not just closer.
-- Move ordering overhead wasn't worth it at depth 2 — might help now with root AB and TT (champion at depth 3).
+## Key insights
+- **Defense > offense**: Asymmetric defensive weighting is the biggest eval win
+- **Time check 512**: Exploits overshoot for free search time. 1024 causes violations.
+- **Speed optimizations are counterproductive** with 512 time check — faster eval = less overshoot = worse
+- **Python built-ins >> Python loops**: .count() (C) beats manual counting
+- **Negamax incompatible** with asymmetric eval (requires symmetric)
+- **Random shuffle matters**: deterministic ordering makes bot predictable and exploitable
+- **Phase-aware eval works**: boosting 4+ threats in late game converts more wins
+- Champion draws 92-96% at 0.1s. Incremental eval tuning has diminishing returns.
+- Next step likely requires a fundamentally different search strategy (MCTS, threat-space) to break the draw ceiling.

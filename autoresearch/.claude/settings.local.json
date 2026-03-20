@@ -18,7 +18,8 @@
       "Write",
       "Read",
       "Bash(python -c \":*)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(python:*)"
     ],
     "deny": [
       "Bash(git push*)",
