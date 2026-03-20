@@ -91,8 +91,7 @@ def evaluate_position(game, player):
                         s = int(s * 1.5)
                     score -= int(s * _DEF_MULT[opp_count])
 
-    # Tiny noise to break eval ties
-    return score + random.randint(-1, 1)
+    return score
 
 
 # Precomputed distance-2 offsets (18 cells, avoids hex_distance calls)
@@ -247,6 +246,19 @@ class MinimaxBot(Bot):
             score = evaluate_position(game, self._player)
             self._tt[tt_key] = (0, score, _EXACT, None)
             return score
+
+        # Futility pruning: if static eval is very far from alpha/beta window,
+        # likely won't change with more search — just return static eval
+        if depth == 1:
+            static_score = evaluate_position(game, self._player)
+            margin = 5000
+            maximizing_check = game.current_player == self._player
+            if maximizing_check and static_score + margin < alpha:
+                self._tt[tt_key] = (1, static_score, _UPPER, None)
+                return static_score
+            if not maximizing_check and static_score - margin > beta:
+                self._tt[tt_key] = (1, static_score, _LOWER, None)
+                return static_score
 
         orig_alpha = alpha
         orig_beta = beta
