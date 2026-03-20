@@ -4,7 +4,7 @@ This is an experiment to have the LLM autonomously improve a game-playing bot.
 
 ## Working directory
 
-You are launched from `autoresearch/`, but all game files (`ai.py`, `game.py`, `evaluate.py`, etc.) live in the parent directory. **Prefix all Bash commands with `cd .. &&`** so they execute in the right place. For example: `cd .. && python -c "..." > run.log 2>&1`. File edits (Edit/Write/Read tools) use absolute paths and don't need this.
+You are launched from `autoresearch/`, but all game files (`ai.py`, `game.py`, `evaluate.py`, etc.) live in the parent directory. **Prefix all Bash commands with `cd .. &&`** so they execute in the right place. For example: `cd .. && python -c "..."`. File edits (Edit/Write/Read tools) use absolute paths and don't need this.
 
 ## Game rules
 
@@ -46,13 +46,8 @@ cd .. && python -c "
 from ai import MinimaxBot as NewBot
 from og_ai import MinimaxBot as OldBot
 from evaluate import evaluate
-<<<<<<< Updated upstream
-evaluate(NewBot(), OldBot(), num_games=200, time_limit=0.05)
-"
-=======
 evaluate(NewBot(time_limit=1.0), OldBot(time_limit=1.0), num_games=400)
-" > run.log 2>&1
->>>>>>> Stashed changes
+"
 ```
 
 If your bot class has been renamed, adjust the import accordingly. `og_ai.py` must always be importable — never modify it directly.
@@ -64,11 +59,7 @@ If your bot class has been renamed, adjust the import accordingly. `og_ai.py` mu
 - Modify `game.py`, `bot.py`, or `evaluate.py`. They are read-only.
 - Modify `og_ai.py` directly. It is only updated by copying `ai.py` over it when a new champion is crowned.
 - Install new packages or add dependencies.
-<<<<<<< Updated upstream
-- Change the time limit. Both bots always get **50ms per move** (set via `evaluate(..., time_limit=0.05)`).
-=======
 - Change the time limit. Both bots always get **1s per move**.
->>>>>>> Stashed changes
 
 **The goal is simple: achieve the highest win rate against the previous champion.** Everything in `ai.py` is fair game: add heuristics, change the search algorithm, improve move ordering, add an opening book, try MCTS, try neural evaluation — whatever works. The only constraint is that it runs without crashing and respects the 50ms time limit (the `Bot` base class and iterative deepening handle this).
 
@@ -95,12 +86,6 @@ The evaluation prints a summary like this:
   MinimaxBot search depth: avg 2.8, range [1-5]
     d1:8  d2:50  d3:70  d4:45  d5:12
 ==================================================
-```
-
-Extract the key numbers from the log:
-
-```bash
-cd .. && tail -n 15 run.log
 ```
 
 ## Logging results
