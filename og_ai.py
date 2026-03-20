@@ -80,7 +80,7 @@ def evaluate_position(game, player):
                 if my_count > 0 and opp_count == 0:
                     score += LINE_SCORES[my_count]
                 elif opp_count > 0 and my_count == 0:
-                    score -= LINE_SCORES[opp_count]
+                    score -= int(LINE_SCORES[opp_count] * 1.2)
 
     return score
 
