@@ -92,8 +92,10 @@ def _play_one(args):
     )
 
 
-def evaluate(bot_a, bot_b, num_games=100, radius=5, win_length=6):
+def evaluate(bot_a, bot_b, num_games=100, radius=5, win_length=6, time_limit=1):
     """Play num_games between two bots in parallel, swapping sides each game."""
+    bot_a.time_limit = time_limit
+    bot_b.time_limit = time_limit
     bot_a_wins = 0
     bot_b_wins = 0
     draws = 0
