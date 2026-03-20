@@ -80,12 +80,9 @@ def evaluate_position(game, player):
                 my_count = window.count(player)
                 opp_count = window.count(opponent)
                 if my_count > 0 and opp_count == 0:
-                    # Bonus for openness: more empties = more potential
-                    empty = 6 - my_count
-                    score += LINE_SCORES[my_count] + (empty * my_count)
+                    score += LINE_SCORES[my_count]
                 elif opp_count > 0 and my_count == 0:
-                    empty = 6 - opp_count
-                    score -= int((LINE_SCORES[opp_count] + empty * opp_count) * _DEF_MULT[opp_count])
+                    score -= int(LINE_SCORES[opp_count] * _DEF_MULT[opp_count])
 
     return score
 
@@ -240,8 +237,12 @@ class MinimaxBot(Bot):
 
         if depth == 0:
             score = evaluate_position(game, self._player)
-            self._tt[tt_key] = (0, score, _EXACT, None)
-            return score
+            # Quiescence: extend if near-win/loss detected
+            if abs(score) < 50000:
+                self._tt[tt_key] = (0, score, _EXACT, None)
+                return score
+            # Tactical position — search 1 more ply
+            depth = 1
 
         orig_alpha = alpha
         orig_beta = beta
