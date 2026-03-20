@@ -42,15 +42,18 @@ Each experiment is an edit to `ai.py` followed by a head-to-head evaluation agai
 You launch an evaluation like this:
 
 ```bash
-cd .. && python -c "
-from ai import MinimaxBot as NewBot
-from og_ai import MinimaxBot as OldBot
-from evaluate import evaluate
-evaluate(NewBot(time_limit=1.0), OldBot(time_limit=1.0), num_games=400)
-"
+cd .. && python run_eval.py
 ```
 
-If your bot class has been renamed, adjust the import accordingly. `og_ai.py` must always be importable — never modify it directly.
+If your bot class has been renamed, pass it as an argument:
+
+```bash
+cd .. && python run_eval.py --new-class MyBot
+```
+
+Full options: `--new-module`, `--new-class`, `--old-module`, `--old-class`, `--games`, `--time-limit`. Defaults are `ai.MinimaxBot` vs `og_ai.MinimaxBot`, 400 games, 1s time limit.
+
+`og_ai.py` must always be importable — never modify it directly.
 
 **What you CAN do:**
 - Modify `ai.py` — this is the only file you edit. Everything is fair game: search algorithm, heuristics, move ordering, candidate generation, evaluation function, time management, etc.

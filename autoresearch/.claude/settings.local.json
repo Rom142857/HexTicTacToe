@@ -1,7 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cd .. && python *)",
+      "Bash(cd .. && python run_eval.py*)",
       "Bash(cd .. && tail *)",
       "Bash(cd .. && cp ai.py og_ai.py)",
       "Bash(cd .. && ls *)",

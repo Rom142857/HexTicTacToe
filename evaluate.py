@@ -30,14 +30,16 @@ class TimeLimitExceeded(Exception):
 
 
 def play_game(bot_a, bot_b, radius=5, win_length=6, violations=None):
-    """Play one game. Returns (winner, depth_counts_a, depth_counts_b).
+    """Play one game. Returns (winner, depth_counts_a, depth_counts_b, time_a, time_b).
 
     depth_counts maps depth -> number of moves at that depth.
+    time_a/time_b are (total_seconds, num_moves) tuples.
     violations is a dict {bot: count} tracked within this game.
     """
     game = HexGame(radius=radius, win_length=win_length)
     bots = {Player.A: bot_a, Player.B: bot_b}
     depths = {Player.A: defaultdict(int), Player.B: defaultdict(int)}
+    times = {Player.A: [0.0, 0], Player.B: [0.0, 0]}  # [total_secs, num_moves]
 
     while not game.game_over:
         player = game.current_player
@@ -46,6 +48,9 @@ def play_game(bot_a, bot_b, radius=5, win_length=6, violations=None):
         t0 = time.time()
         q, r = bot.get_move(game)
         elapsed = time.time() - t0
+
+        times[player][0] += elapsed
+        times[player][1] += 1
 
         if elapsed > bot.time_limit * GRACE_FACTOR:
             if violations is not None:
@@ -57,9 +62,11 @@ def play_game(bot_a, bot_b, radius=5, win_length=6, violations=None):
 
         if not game.make_move(q, r):
             return (Player.B if player == Player.A else Player.A,
-                    depths[Player.A], depths[Player.B])
+                    depths[Player.A], depths[Player.B],
+                    tuple(times[Player.A]), tuple(times[Player.B]))
 
-    return game.winner, depths[Player.A], depths[Player.B]
+    return (game.winner, depths[Player.A], depths[Player.B],
+            tuple(times[Player.A]), tuple(times[Player.B]))
 
 
 def _play_one(args):
@@ -75,11 +82,12 @@ def _play_one(args):
     violations = {}
     exceeded = False
     try:
-        winner, d_a, d_b = play_game(seat_a, seat_b, radius, win_length, violations)
+        winner, d_a, d_b, t_a, t_b = play_game(seat_a, seat_b, radius, win_length, violations)
     except TimeLimitExceeded:
         exceeded = True
         winner = Player.NONE
         d_a, d_b = defaultdict(int), defaultdict(int)
+        t_a, t_b = (0.0, 0), (0.0, 0)
 
     return (
         winner,
@@ -89,6 +97,8 @@ def _play_one(args):
         violations.get(seat_a, 0),
         violations.get(seat_b, 0),
         exceeded,
+        t_a,
+        t_b,
     )
 
 
@@ -105,6 +115,8 @@ def evaluate(bot_a, bot_b, num_games=100, radius=5, win_length=6, time_limit=1):
     bot_a_violations = 0
     bot_b_violations = 0
     aborted_games = 0
+    bot_a_time = [0.0, 0]  # [total_secs, num_moves]
+    bot_b_time = [0.0, 0]
 
     workers = os.cpu_count() or 1
     args = [(bot_a, bot_b, i, radius, win_length) for i in range(num_games)]
@@ -113,7 +125,7 @@ def evaluate(bot_a, bot_b, num_games=100, radius=5, win_length=6, time_limit=1):
 
     with Pool(workers) as pool:
         for result in pool.imap_unordered(_play_one, args):
-            winner, swapped, d_a, d_b, v_a, v_b, exceeded = result
+            winner, swapped, d_a, d_b, v_a, v_b, exceeded, t_a, t_b = result
 
             if exceeded:
                 aborted_games += 1
@@ -126,6 +138,8 @@ def evaluate(bot_a, bot_b, num_games=100, radius=5, win_length=6, time_limit=1):
                     bot_a_depths[d] += c
                 bot_b_violations += v_a
                 bot_a_violations += v_b
+                bot_b_time[0] += t_a[0]; bot_b_time[1] += t_a[1]
+                bot_a_time[0] += t_b[0]; bot_a_time[1] += t_b[1]
                 if winner == Player.A:
                     bot_b_wins += 1
                 elif winner == Player.B:
@@ -139,6 +153,8 @@ def evaluate(bot_a, bot_b, num_games=100, radius=5, win_length=6, time_limit=1):
                     bot_b_depths[d] += c
                 bot_a_violations += v_a
                 bot_b_violations += v_b
+                bot_a_time[0] += t_a[0]; bot_a_time[1] += t_a[1]
+                bot_b_time[0] += t_b[0]; bot_b_time[1] += t_b[1]
                 if winner == Player.A:
                     bot_a_wins += 1
                 elif winner == Player.B:
@@ -172,6 +188,11 @@ def evaluate(bot_a, bot_b, num_games=100, radius=5, win_length=6, time_limit=1):
         buckets = sorted(depths.items())
         dist = "  ".join(f"d{d}:{c}" for d, c in buckets)
         print(f"    {dist}")
+
+    for name, bt in [(str(bot_a), bot_a_time), (str(bot_b), bot_b_time)]:
+        if bt[1] > 0:
+            avg_ms = 1000 * bt[0] / bt[1]
+            print(f"  {name} avg move time: {avg_ms:.0f}ms ({bt[1]} moves)")
 
     if bot_a_violations or bot_b_violations or aborted_games:
         print()
