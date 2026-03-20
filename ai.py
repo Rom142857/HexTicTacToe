@@ -26,7 +26,7 @@ def hex_distance(dq, dr):
 # Longer lines are exponentially more valuable
 LINE_SCORES = [0, 1, 10, 100, 1000, 10000, 100000]
 # Defensive multipliers per count — higher counts need more urgent blocking
-_DEF_MULT = [0, 1.0, 1.0, 1.2, 1.5, 2.0, 1.0]
+_DEF_MULT = [0, 1.0, 0.8, 1.2, 1.5, 2.0, 1.0]
 
 
 # Zobrist hash table — random 64-bit values for each (cell, player) pair
@@ -45,32 +45,40 @@ _UPPER = 2  # true value <= stored (failed low)
 
 
 def evaluate_position(game, player):
-    """Score the position from player's perspective."""
+    """Score the position from player's perspective.
+
+    For each line direction, scan every possible 6-cell window and count
+    how many belong to each player. A window with stones from both players
+    is dead (score 0). Otherwise score based on count.
+    """
     opponent = Player.B if player == Player.A else Player.A
-    pv = player.value
-    ov = opponent.value
     score = 0
 
+    # For each direction, walk all lines through the board
     for dq, dr in HEX_DIRECTIONS:
+        # Find all starting cells: cells with no predecessor in this direction
         visited = set()
         for cell in game.board:
             if cell in visited:
                 continue
+            # Walk backward to find the start of this line
             q, r = cell
             while (q - dq, r - dr) in game.board:
                 q -= dq
                 r -= dr
+            # Now walk forward, collecting the full line
             line = []
             cq, cr = q, r
             while (cq, cr) in game.board:
                 visited.add((cq, cr))
-                line.append(game.board[(cq, cr)].value)
+                line.append(game.board[(cq, cr)])
                 cq += dq
                 cr += dr
+            # Score all windows of length 6 in this line
             for i in range(len(line) - 5):
                 window = line[i:i+6]
-                my_count = window.count(pv)
-                opp_count = window.count(ov)
+                my_count = window.count(player)
+                opp_count = window.count(opponent)
                 if my_count > 0 and opp_count == 0:
                     score += LINE_SCORES[my_count]
                 elif opp_count > 0 and my_count == 0:
@@ -150,7 +158,7 @@ class MinimaxBot(Bot):
 
     def _check_time(self):
         self._nodes += 1
-        if self._nodes % 128 == 0 and time.time() >= self._deadline:
+        if self._nodes % 512 == 0 and time.time() >= self._deadline:
             raise TimeUp
 
     def _make(self, game, q, r):
