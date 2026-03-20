@@ -85,36 +85,24 @@ def evaluate_position(game, player):
     return score
 
 
-_NEIGHBOR_OFFSETS = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1)]
+# Precomputed distance-2 offsets (18 cells, avoids hex_distance calls)
+_D2_OFFSETS = [(dq, dr) for dq in range(-2, 3) for dr in range(-2, 3)
+               if hex_distance(dq, dr) <= 2 and (dq, dr) != (0, 0)]
 
 
 def get_candidates(game):
-    """Return empty cells within hex-distance 2 of any occupied cell, sorted by neighbor count."""
+    """Return empty cells within hex-distance 2 of any occupied cell."""
     occupied = [pos for pos, p in game.board.items() if p != Player.NONE]
     if not occupied:
         return [(0, 0)]
 
     candidates = set()
     for q, r in occupied:
-        for dq in range(-2, 3):
-            for dr in range(-2, 3):
-                if hex_distance(dq, dr) <= 2:
-                    nq, nr = q + dq, r + dr
-                    if (nq, nr) in game.board and game.board[(nq, nr)] == Player.NONE:
-                        candidates.add((nq, nr))
-
-    # Sort by number of occupied neighbors (descending) — cheap move ordering
-    board = game.board
-    def neighbor_count(cell):
-        q, r = cell
-        count = 0
-        for dq, dr in _NEIGHBOR_OFFSETS:
-            n = board.get((q + dq, r + dr))
-            if n is not None and n != Player.NONE:
-                count += 1
-        return count
-
-    return sorted(candidates, key=neighbor_count, reverse=True)
+        for dq, dr in _D2_OFFSETS:
+            nq, nr = q + dq, r + dr
+            if (nq, nr) in game.board and game.board[(nq, nr)] == Player.NONE:
+                candidates.add((nq, nr))
+    return list(candidates)
 
 
 class MinimaxBot(Bot):
