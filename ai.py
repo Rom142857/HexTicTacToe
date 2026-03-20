@@ -438,11 +438,17 @@ class MinimaxBot(Bot):
 
         if maximizing:
             value = -math.inf
-            for q, r in candidates:
+            for i, (q, r) in enumerate(candidates):
                 player = game.current_player
                 state = (player, game.moves_left_in_turn, game.winner, game.game_over)
                 self._make(game, q, r)
-                child_val = self._minimax(game, depth - 1, alpha, beta)
+                # LMR: reduce depth for late moves at sufficient depth
+                if i >= 3 and depth >= 3:
+                    child_val = self._minimax(game, depth - 2, alpha, beta)
+                    if child_val > alpha:
+                        child_val = self._minimax(game, depth - 1, alpha, beta)
+                else:
+                    child_val = self._minimax(game, depth - 1, alpha, beta)
                 self._undo(game, q, r, state, player)
                 if child_val > value:
                     value = child_val
@@ -453,11 +459,17 @@ class MinimaxBot(Bot):
                     break
         else:
             value = math.inf
-            for q, r in candidates:
+            for i, (q, r) in enumerate(candidates):
                 player = game.current_player
                 state = (player, game.moves_left_in_turn, game.winner, game.game_over)
                 self._make(game, q, r)
-                child_val = self._minimax(game, depth - 1, alpha, beta)
+                # LMR: reduce depth for late moves at sufficient depth
+                if i >= 3 and depth >= 3:
+                    child_val = self._minimax(game, depth - 2, alpha, beta)
+                    if child_val < beta:
+                        child_val = self._minimax(game, depth - 1, alpha, beta)
+                else:
+                    child_val = self._minimax(game, depth - 1, alpha, beta)
                 self._undo(game, q, r, state, player)
                 if child_val < value:
                     value = child_val
