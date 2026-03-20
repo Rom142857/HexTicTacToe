@@ -117,7 +117,6 @@ class MinimaxBot(Bot):
         self._player = game.current_player
         self._nodes = 0
         self.last_depth = 0
-        self._tt.clear()
 
         # Compute initial Zobrist hash from board state
         self._hash = 0
