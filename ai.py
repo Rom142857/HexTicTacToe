@@ -74,21 +74,33 @@ def evaluate_position(game, player):
                 line.append(game.board[(cq, cr)])
                 cq += dq
                 cr += dr
-            # Score all windows of length 6 in this line
+            # Score windows with sliding counter (add new cell, remove old)
             n = len(line)
-            for i in range(n - 5):
-                my_count = 0
-                opp_count = 0
-                for j in range(i, i + 6):
-                    v = line[j]
-                    if v == player:
-                        my_count += 1
-                    elif v == opponent:
-                        opp_count += 1
+            if n >= 6:
+                # Initialize first window
+                first_window = line[0:6]
+                my_count = first_window.count(player)
+                opp_count = first_window.count(opponent)
                 if my_count > 0 and opp_count == 0:
                     score += LINE_SCORES[my_count]
                 elif opp_count > 0 and my_count == 0:
                     score -= int(LINE_SCORES[opp_count] * _DEF_MULT[opp_count])
+                # Slide the window
+                for i in range(1, n - 5):
+                    leaving = line[i - 1]
+                    if leaving == player:
+                        my_count -= 1
+                    elif leaving == opponent:
+                        opp_count -= 1
+                    entering = line[i + 5]
+                    if entering == player:
+                        my_count += 1
+                    elif entering == opponent:
+                        opp_count += 1
+                    if my_count > 0 and opp_count == 0:
+                        score += LINE_SCORES[my_count]
+                    elif opp_count > 0 and my_count == 0:
+                        score -= int(LINE_SCORES[opp_count] * _DEF_MULT[opp_count])
 
     return score
 
