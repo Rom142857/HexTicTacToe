@@ -156,7 +156,7 @@ class MinimaxBot(Bot):
 
     def _check_time(self):
         self._nodes += 1
-        if self._nodes % 128 == 0 and time.time() >= self._deadline:
+        if self._nodes % 512 == 0 and time.time() >= self._deadline:
             raise TimeUp
 
     def _make(self, game, q, r):
