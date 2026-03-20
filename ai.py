@@ -212,9 +212,9 @@ class MinimaxBot(Bot):
 
         if game.game_over:
             if game.winner == self._player:
-                return 100000000
+                return 100000000 + depth  # prefer faster wins
             elif game.winner != Player.NONE:
-                return -100000000
+                return -100000000 - depth  # prefer slower losses
             return 0
 
         # TT lookup
