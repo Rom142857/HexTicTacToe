@@ -26,7 +26,7 @@ def hex_distance(dq, dr):
 # Longer lines are exponentially more valuable
 LINE_SCORES = [0, 1, 10, 200, 1000, 10000, 100000]
 # Defensive multipliers per count — higher counts need more urgent blocking
-_DEF_MULT = [0, 0.8, 0.8, 1.2, 1.5, 3.0, 1.0]
+_DEF_MULT = [0, 0.8, 0.8, 1.0, 1.5, 3.0, 1.0]
 
 
 # Zobrist hash table — random 64-bit values for each (cell, player) pair
@@ -90,19 +90,17 @@ def evaluate_position(game, player):
 # Precomputed distance-2 offsets (18 cells, avoids hex_distance calls)
 _D2_OFFSETS = [(dq, dr) for dq in range(-2, 3) for dr in range(-2, 3)
                if hex_distance(dq, dr) <= 2 and (dq, dr) != (0, 0)]
-_D1_OFFSETS = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1)]
 
 
-def get_candidates(game, narrow=False):
-    """Return empty cells within hex-distance 2 (or 1 if narrow) of any occupied cell."""
+def get_candidates(game):
+    """Return empty cells within hex-distance 2 of any occupied cell."""
     occupied = [pos for pos, p in game.board.items() if p != Player.NONE]
     if not occupied:
         return [(0, 0)]
 
-    offsets = _D1_OFFSETS if narrow else _D2_OFFSETS
     candidates = set()
     for q, r in occupied:
-        for dq, dr in offsets:
+        for dq, dr in _D2_OFFSETS:
             nq, nr = q + dq, r + dr
             if (nq, nr) in game.board and game.board[(nq, nr)] == Player.NONE:
                 candidates.add((nq, nr))
@@ -244,7 +242,7 @@ class MinimaxBot(Bot):
 
         orig_alpha = alpha
         orig_beta = beta
-        candidates = get_candidates(game, narrow=(depth <= 1))
+        candidates = get_candidates(game)
 
         # Move ordering: TT move first
         if tt_move:
