@@ -3,3 +3,7 @@ db5797c	1.00	1.9	keep	add heuristic eval (line-window scoring)
 01e469f	0.50	2.0	discard	move ordering by line-neighbor heuristic
 7201437	0.50	2.0	discard	precompute 6-cell windows for faster eval
 68cb1ad	0.42	3.1	discard	narrow candidates to distance 1
+f6751d4	0.50	1.9	discard	transposition table with Zobrist hashing (no root AB)
+f6751d4	0.51	3.2	keep	TT + Zobrist + root alpha-beta fix
+n/a	0.43	4.0	discard	precomputed windows eval (identical values but lost)
+n/a	0.28	4.3	discard	incremental eval (correct but deeper search hurts)

@@ -1,7 +1,9 @@
-"""Minimax bot with iterative deepening, heuristic eval, and move ordering.
+"""Minimax bot with iterative deepening, heuristic eval, and transposition table.
 
-Uses alpha-beta pruning with a heuristic evaluation function that scores
-positions based on contiguous line segments along the three hex axes.
+Uses alpha-beta pruning with Zobrist hashing for a transposition table.
+The TT avoids re-evaluating positions reached via different move orders
+(especially common with 2-stones-per-turn) and provides move ordering
+from previous iterations.
 """
 
 import math
@@ -23,6 +25,21 @@ def hex_distance(dq, dr):
 # Scores for contiguous groups of length N (index = count)
 # Longer lines are exponentially more valuable
 LINE_SCORES = [0, 1, 10, 100, 1000, 10000, 100000]
+
+
+# Zobrist hash table — random 64-bit values for each (cell, player) pair
+_zobrist_rng = random.Random(42)
+_zobrist = {}
+for _q in range(-5, 6):
+    for _r in range(-5, 6):
+        if abs(-_q - _r) <= 5:
+            for _p in (Player.A, Player.B):
+                _zobrist[(_q, _r, _p)] = _zobrist_rng.getrandbits(64)
+
+# TT entry flags
+_EXACT = 0
+_LOWER = 1  # true value >= stored (beta cutoff)
+_UPPER = 2  # true value <= stored (failed low)
 
 
 def evaluate_position(game, player):
@@ -86,18 +103,27 @@ def get_candidates(game):
 
 
 class MinimaxBot(Bot):
-    """Iterative-deepening minimax with alpha-beta pruning and heuristic eval."""
+    """Iterative-deepening minimax with alpha-beta pruning, TT, and heuristic eval."""
 
     def __init__(self, time_limit=0.05):
         super().__init__(time_limit)
         self._deadline = 0
         self._nodes = 0
+        self._tt = {}
+        self._hash = 0
 
     def get_move(self, game):
         self._deadline = time.time() + self.time_limit
         self._player = game.current_player
         self._nodes = 0
         self.last_depth = 0
+        self._tt.clear()
+
+        # Compute initial Zobrist hash from board state
+        self._hash = 0
+        for pos, p in game.board.items():
+            if p != Player.NONE:
+                self._hash ^= _zobrist[(pos[0], pos[1], p)]
 
         candidates = get_candidates(game)
         if len(candidates) == 1:
@@ -109,6 +135,7 @@ class MinimaxBot(Bot):
         saved_board = dict(game.board)
         saved_state = game.save_state()
         saved_move_count = game.move_count
+        saved_hash = self._hash
 
         for depth in range(1, 200):
             try:
@@ -119,6 +146,7 @@ class MinimaxBot(Bot):
                 game.move_count = saved_move_count
                 (game.current_player, game.moves_left_in_turn,
                  game.winner, game.winning_cells, game.game_over) = saved_state
+                self._hash = saved_hash
                 break
 
         return best_move
@@ -128,25 +156,52 @@ class MinimaxBot(Bot):
         if self._nodes % 128 == 0 and time.time() >= self._deadline:
             raise TimeUp
 
+    def _make(self, game, q, r):
+        """Make move and update Zobrist hash."""
+        player = game.current_player
+        self._hash ^= _zobrist[(q, r, player)]
+        game.make_move(q, r)
+
+    def _undo(self, game, q, r, state, player):
+        """Undo move and restore Zobrist hash."""
+        game.undo_move(q, r, state)
+        self._hash ^= _zobrist[(q, r, player)]
+
+    def _tt_key(self, game):
+        return (self._hash, game.current_player, game.moves_left_in_turn)
+
     def _search_root(self, game, candidates, depth):
         maximizing = game.current_player == self._player
         best_move = candidates[0]
-        best_score = -math.inf if maximizing else math.inf
+        alpha = -math.inf
+        beta = math.inf
 
-        for q, r in candidates:
+        # Move ordering: TT best move first
+        tt_entry = self._tt.get(self._tt_key(game))
+        if tt_entry and tt_entry[3]:
+            tt_move = tt_entry[3]
+            ordered = [tt_move] + [m for m in candidates if m != tt_move]
+        else:
+            ordered = candidates
+
+        for q, r in ordered:
             self._check_time()
+            player = game.current_player
             state = game.save_state()
-            game.make_move(q, r)
-            score = self._minimax(game, depth - 1, -math.inf, math.inf)
-            game.undo_move(q, r, state)
+            self._make(game, q, r)
+            score = self._minimax(game, depth - 1, alpha, beta)
+            self._undo(game, q, r, state, player)
 
-            if maximizing and score > best_score:
-                best_score = score
+            if maximizing and score > alpha:
+                alpha = score
                 best_move = (q, r)
-            elif not maximizing and score < best_score:
-                best_score = score
+            elif not maximizing and score < beta:
+                beta = score
                 best_move = (q, r)
 
+        # Store root result in TT
+        best_score = alpha if maximizing else beta
+        self._tt[self._tt_key(game)] = (depth, best_score, _EXACT, best_move)
         return best_move
 
     def _minimax(self, game, depth, alpha, beta):
@@ -159,31 +214,76 @@ class MinimaxBot(Bot):
                 return -100000000
             return 0
 
-        if depth == 0:
-            return evaluate_position(game, self._player)
+        # TT lookup
+        tt_key = self._tt_key(game)
+        tt_entry = self._tt.get(tt_key)
+        tt_move = None
+        if tt_entry:
+            tt_depth, tt_score, tt_flag, tt_move = tt_entry
+            if tt_depth >= depth:
+                if tt_flag == _EXACT:
+                    return tt_score
+                elif tt_flag == _LOWER:
+                    alpha = max(alpha, tt_score)
+                elif tt_flag == _UPPER:
+                    beta = min(beta, tt_score)
+                if alpha >= beta:
+                    return tt_score
 
+        if depth == 0:
+            score = evaluate_position(game, self._player)
+            self._tt[tt_key] = (0, score, _EXACT, None)
+            return score
+
+        orig_alpha = alpha
+        orig_beta = beta
         candidates = get_candidates(game)
+
+        # Move ordering: TT move first
+        if tt_move:
+            ordered = [tt_move] + [m for m in candidates if m != tt_move]
+        else:
+            ordered = candidates
+
         maximizing = game.current_player == self._player
+        best_move = None
 
         if maximizing:
             value = -math.inf
-            for q, r in candidates:
+            for q, r in ordered:
+                player = game.current_player
                 state = game.save_state()
-                game.make_move(q, r)
-                value = max(value, self._minimax(game, depth - 1, alpha, beta))
-                game.undo_move(q, r, state)
+                self._make(game, q, r)
+                child_val = self._minimax(game, depth - 1, alpha, beta)
+                self._undo(game, q, r, state, player)
+                if child_val > value:
+                    value = child_val
+                    best_move = (q, r)
                 alpha = max(alpha, value)
                 if alpha >= beta:
                     break
-            return value
         else:
             value = math.inf
-            for q, r in candidates:
+            for q, r in ordered:
+                player = game.current_player
                 state = game.save_state()
-                game.make_move(q, r)
-                value = min(value, self._minimax(game, depth - 1, alpha, beta))
-                game.undo_move(q, r, state)
+                self._make(game, q, r)
+                child_val = self._minimax(game, depth - 1, alpha, beta)
+                self._undo(game, q, r, state, player)
+                if child_val < value:
+                    value = child_val
+                    best_move = (q, r)
                 beta = min(beta, value)
                 if alpha >= beta:
                     break
-            return value
+
+        # Determine TT flag
+        if value <= orig_alpha:
+            flag = _UPPER
+        elif value >= orig_beta:
+            flag = _LOWER
+        else:
+            flag = _EXACT
+
+        self._tt[tt_key] = (depth, value, flag, best_move)
+        return value
