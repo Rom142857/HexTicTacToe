@@ -10,6 +10,7 @@ You are launched from `autoresearch/`, but all game files (`ai.py`, `game.py`, `
 - **Python/shell commands**: Use `../` paths instead of `cd .. &&`. For example: `python ../run_eval.py`, `tail ../ai.py`, `cp ../ai.py ../og_ai.py`.
 - **Git commands**: Run them as-is from `autoresearch/` — git works from any subdirectory. Never prefix git commands with `cd`.
 - **NEVER use `cd .. &&` or `cd ../` prefixes** for any command.
+- **Ad-hoc testing**: Never use `python -c "..."` for inline scripts. Instead, write your code to `../test.py` and run `python ../test.py`. Delete it when done.
 - File edits (Edit/Write/Read tools) use absolute paths and don't need any of this.
 
 ## Game rules
