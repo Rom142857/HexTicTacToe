@@ -128,6 +128,10 @@ class MinimaxBot(Bot):
             if p != Player.NONE:
                 self._hash ^= _zobrist[(pos[0], pos[1], p)]
 
+        # Always open at center — strongest opening on hex board
+        if game.move_count == 0:
+            return (0, 0)
+
         candidates = get_candidates(game)
         if len(candidates) == 1:
             return candidates[0]
@@ -212,9 +216,9 @@ class MinimaxBot(Bot):
 
         if game.game_over:
             if game.winner == self._player:
-                return 100000000 + depth  # prefer faster wins
+                return 100000000
             elif game.winner != Player.NONE:
-                return -100000000 - depth  # prefer slower losses
+                return -100000000
             return 0
 
         # TT lookup
