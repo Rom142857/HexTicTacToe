@@ -6,6 +6,7 @@ Uses iterative deepening so it always has a move ready when time expires.
 """
 
 import math
+import random
 import time
 from bot import Bot
 from game import Player
@@ -55,13 +56,22 @@ class MinimaxBot(Bot):
         if len(candidates) == 1:
             return candidates[0]
 
+        random.shuffle(candidates)
         best_move = candidates[0]
+
+        saved_board = dict(game.board)
+        saved_state = game.save_state()
+        saved_move_count = game.move_count
 
         for depth in range(1, 200):
             try:
                 best_move = self._search_root(game, candidates, depth)
                 self.last_depth = depth
             except TimeUp:
+                game.board = saved_board
+                game.move_count = saved_move_count
+                (game.current_player, game.moves_left_in_turn,
+                 game.winner, game.winning_cells, game.game_over) = saved_state
                 break
 
         return best_move
