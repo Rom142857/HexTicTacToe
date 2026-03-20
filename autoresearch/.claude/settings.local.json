@@ -4,6 +4,7 @@
       "Bash(cd .. && python *)",
       "Bash(cd .. && tail *)",
       "Bash(cd .. && cp ai.py og_ai.py)",
+      "Bash(cd .. && ls *)",
       "Bash(git add *)",
       "Bash(git commit *)",
       "Bash(git checkout *)",
