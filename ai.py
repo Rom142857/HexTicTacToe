@@ -47,7 +47,6 @@ _UPPER = 2  # true value <= stored (failed low)
 def evaluate_position(game, player):
     """Score the position from player's perspective."""
     opponent = Player.B if player == Player.A else Player.A
-    # Use int values for faster comparison in hot loop
     pv = player.value
     ov = opponent.value
     score = 0
@@ -151,7 +150,7 @@ class MinimaxBot(Bot):
 
     def _check_time(self):
         self._nodes += 1
-        if self._nodes % 512 == 0 and time.time() >= self._deadline:
+        if self._nodes % 128 == 0 and time.time() >= self._deadline:
             raise TimeUp
 
     def _make(self, game, q, r):
