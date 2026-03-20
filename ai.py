@@ -24,7 +24,7 @@ def hex_distance(dq, dr):
 
 # Scores for contiguous groups of length N (index = count)
 # Longer lines are exponentially more valuable
-LINE_SCORES = [0, 1, 10, 100, 1000, 10000, 100000]
+LINE_SCORES = [0, 1, 10, 100, 2000, 50000, 100000]
 
 
 # Zobrist hash table — random 64-bit values for each (cell, player) pair
@@ -81,16 +81,6 @@ def evaluate_position(game, player):
                     score += LINE_SCORES[my_count]
                 elif opp_count > 0 and my_count == 0:
                     score -= int(LINE_SCORES[opp_count] * 1.2)
-
-    # Center control bonus: stones closer to center are worth more
-    for (q, r), occupant in game.board.items():
-        if occupant != Player.NONE:
-            dist = max(abs(q), abs(r), abs(-q - r))
-            bonus = 5 - dist  # center=5, edge=0
-            if occupant == player:
-                score += bonus
-            else:
-                score -= bonus
 
     return score
 
