@@ -425,9 +425,10 @@ class MinimaxBot(Bot):
         orig_beta = beta
         candidates = list(self._cand_set)
 
-        # Move ordering: TT best move first
-        if tt_move:
-            candidates = [tt_move] + [m for m in candidates if m != tt_move]
+        # Move ordering: TT best move first (swap to front, no new list)
+        if tt_move in self._cand_set:
+            idx = candidates.index(tt_move)
+            candidates[0], candidates[idx] = candidates[idx], candidates[0]
 
         maximizing = game.current_player == self._player
         best_move = None
