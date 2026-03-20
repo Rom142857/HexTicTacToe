@@ -45,62 +45,37 @@ _UPPER = 2  # true value <= stored (failed low)
 
 
 def evaluate_position(game, player):
-    """Score the position from player's perspective.
-
-    For each line direction, scan every possible 6-cell window and count
-    how many belong to each player. A window with stones from both players
-    is dead (score 0). Otherwise score based on count.
-    """
+    """Score the position from player's perspective."""
     opponent = Player.B if player == Player.A else Player.A
+    # Use int values for faster comparison in hot loop
+    pv = player.value
+    ov = opponent.value
     score = 0
 
-    # For each direction, walk all lines through the board
     for dq, dr in HEX_DIRECTIONS:
-        # Find all starting cells: cells with no predecessor in this direction
         visited = set()
         for cell in game.board:
             if cell in visited:
                 continue
-            # Walk backward to find the start of this line
             q, r = cell
             while (q - dq, r - dr) in game.board:
                 q -= dq
                 r -= dr
-            # Now walk forward, collecting the full line
             line = []
             cq, cr = q, r
             while (cq, cr) in game.board:
                 visited.add((cq, cr))
-                line.append(game.board[(cq, cr)])
+                line.append(game.board[(cq, cr)].value)
                 cq += dq
                 cr += dr
-            # Score windows with sliding counter (add new cell, remove old)
-            n = len(line)
-            if n >= 6:
-                # Initialize first window
-                first_window = line[0:6]
-                my_count = first_window.count(player)
-                opp_count = first_window.count(opponent)
+            for i in range(len(line) - 5):
+                window = line[i:i+6]
+                my_count = window.count(pv)
+                opp_count = window.count(ov)
                 if my_count > 0 and opp_count == 0:
                     score += LINE_SCORES[my_count]
                 elif opp_count > 0 and my_count == 0:
                     score -= int(LINE_SCORES[opp_count] * _DEF_MULT[opp_count])
-                # Slide the window
-                for i in range(1, n - 5):
-                    leaving = line[i - 1]
-                    if leaving == player:
-                        my_count -= 1
-                    elif leaving == opponent:
-                        opp_count -= 1
-                    entering = line[i + 5]
-                    if entering == player:
-                        my_count += 1
-                    elif entering == opponent:
-                        opp_count += 1
-                    if my_count > 0 and opp_count == 0:
-                        score += LINE_SCORES[my_count]
-                    elif opp_count > 0 and my_count == 0:
-                        score -= int(LINE_SCORES[opp_count] * _DEF_MULT[opp_count])
 
     return score
 
