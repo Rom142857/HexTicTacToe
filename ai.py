@@ -90,17 +90,21 @@ def evaluate_position(game, player):
 # Precomputed distance-2 offsets (18 cells, avoids hex_distance calls)
 _D2_OFFSETS = [(dq, dr) for dq in range(-2, 3) for dr in range(-2, 3)
                if hex_distance(dq, dr) <= 2 and (dq, dr) != (0, 0)]
+# Distance-3 offsets for root-only wider search
+_D3_OFFSETS = [(dq, dr) for dq in range(-3, 4) for dr in range(-3, 4)
+               if hex_distance(dq, dr) <= 3 and (dq, dr) != (0, 0)]
 
 
-def get_candidates(game):
-    """Return empty cells within hex-distance 2 of any occupied cell."""
+def get_candidates(game, root=False):
+    """Return empty cells within hex-distance 2 (or 3 at root) of any occupied cell."""
     occupied = [pos for pos, p in game.board.items() if p != Player.NONE]
     if not occupied:
         return [(0, 0)]
 
+    offsets = _D3_OFFSETS if root else _D2_OFFSETS
     candidates = set()
     for q, r in occupied:
-        for dq, dr in _D2_OFFSETS:
+        for dq, dr in offsets:
             nq, nr = q + dq, r + dr
             if (nq, nr) in game.board and game.board[(nq, nr)] == Player.NONE:
                 candidates.add((nq, nr))
@@ -130,12 +134,11 @@ class MinimaxBot(Bot):
             if p != Player.NONE:
                 self._hash ^= _zobrist[(pos[0], pos[1], p)]
 
-        candidates = get_candidates(game)
+        candidates = get_candidates(game, root=True)
         if len(candidates) == 1:
             return candidates[0]
 
-        # Order candidates by distance to center (closer first, deterministic)
-        candidates.sort(key=lambda c: max(abs(c[0]), abs(c[1]), abs(-c[0]-c[1])))
+        random.shuffle(candidates)
         best_move = candidates[0]
 
         saved_board = dict(game.board)
