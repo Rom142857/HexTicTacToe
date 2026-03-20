@@ -1,24 +1,27 @@
 # Ideas for Hex Tic-Tac-Toe Bot Improvement
 
 ## Priority ideas
-- [ ] Add heuristic evaluation (line counting, threat detection) — the bot currently has NO eval, so it plays randomly at shallow depths
-- [ ] Better candidate generation — prioritize cells near existing stones, limit branching factor
-- [ ] Move ordering — try winning/threatening moves first for better alpha-beta pruning
 - [ ] Threat-space search — detect forced sequences (open 5s, double 4s, etc.)
 - [ ] Opening book — precomputed first moves (center is strong)
-- [ ] Pattern-based eval — score based on contiguous groups along each axis
 - [ ] Killer move heuristic / history heuristic for move ordering
-- [ ] Narrow candidates aggressively (distance 1 instead of 2, or top-N by heuristic)
 - [ ] MCTS approach
 - [ ] Node priors
 - [ ] Consider both stones of a turn together in search
 - [ ] Transposition table with Zobrist hashing
+- [ ] Incremental eval (update score on make/undo instead of full rescan)
+- [ ] Negamax refactor (simpler, fewer branches in code)
 
 ## Tried
-(fresh run - mar19b)
+- [x] Heuristic eval (line-window scoring) — **100% win rate vs no-eval baseline, KEEP**
+- [x] Move ordering by line-neighbor heuristic — 50%, no improvement, DISCARD
+- [x] Precompute 6-cell windows — 50%, no improvement, DISCARD (marginal speedup not enough)
+- [x] Narrow candidates to distance 1 — 42%, WORSE (misses important moves)
 
 ## Notes
-- 1s time limit per move — decent budget for search
+- 0.5s time limit per move
 - Board is 91 cells, branching factor can be huge — must prune aggressively
 - Connect6 literature relevant (6-in-a-row, 2 stones per turn)
 - The 2-stones-per-turn structure means threats work differently than standard connect games
+- Current champion searches avg depth ~2 with distance-2 candidates. The eval is the bottleneck.
+- Distance-1 candidates search deeper (3.1) but miss critical moves — need a smarter way to narrow, not just closer.
+- Move ordering overhead wasn't worth it at depth 2 — might help once we search deeper.
