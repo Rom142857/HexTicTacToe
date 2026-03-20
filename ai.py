@@ -196,8 +196,8 @@ class MinimaxBot(Bot):
 
         if game.game_over:
             if game.winner != Player.NONE:
-                # The winner just played, so from current player's view it's a loss
-                return -100000000
+                # Winner is current_player (make_move doesn't switch on win)
+                return 100000000
             return 0
 
         # TT lookup
