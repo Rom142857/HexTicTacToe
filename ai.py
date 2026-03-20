@@ -24,7 +24,7 @@ def hex_distance(dq, dr):
 
 # Scores for contiguous groups of length N (index = count)
 # Longer lines are exponentially more valuable
-LINE_SCORES = [0, 1, 10, 100, 1000, 10000, 100000]
+LINE_SCORES = [0, 1, 10, 200, 1000, 10000, 100000]
 # Defensive multipliers per count — higher counts need more urgent blocking
 _DEF_MULT = [0, 0.8, 0.8, 1.2, 1.5, 3.0, 1.0]
 
@@ -237,12 +237,8 @@ class MinimaxBot(Bot):
 
         if depth == 0:
             score = evaluate_position(game, self._player)
-            # Quiescence: extend if near-win/loss detected
-            if abs(score) < 50000:
-                self._tt[tt_key] = (0, score, _EXACT, None)
-                return score
-            # Tactical position — search 1 more ply
-            depth = 1
+            self._tt[tt_key] = (0, score, _EXACT, None)
+            return score
 
         orig_alpha = alpha
         orig_beta = beta
