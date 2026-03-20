@@ -37,7 +37,7 @@ Once you get confirmation, kick off the experimentation.
 
 ## Experimentation
 
-Each experiment is an edit to `ai.py` followed by a head-to-head evaluation against the champion (`og_ai.py`). Evaluation runs **200 games** (sides swapped each game) with a **50ms time limit per move** for both bots.
+Each experiment is an edit to `ai.py` followed by a head-to-head evaluation against the champion (`og_ai.py`). Evaluation runs **400 games** (sides swapped each game) with a **1s time limit per move** for both bots.
 
 You launch an evaluation like this:
 
@@ -46,8 +46,13 @@ cd .. && python -c "
 from ai import MinimaxBot as NewBot
 from og_ai import MinimaxBot as OldBot
 from evaluate import evaluate
+<<<<<<< Updated upstream
 evaluate(NewBot(), OldBot(), num_games=200, time_limit=0.05)
 "
+=======
+evaluate(NewBot(time_limit=1.0), OldBot(time_limit=1.0), num_games=400)
+" > run.log 2>&1
+>>>>>>> Stashed changes
 ```
 
 If your bot class has been renamed, adjust the import accordingly. `og_ai.py` must always be importable — never modify it directly.
@@ -59,7 +64,11 @@ If your bot class has been renamed, adjust the import accordingly. `og_ai.py` mu
 - Modify `game.py`, `bot.py`, or `evaluate.py`. They are read-only.
 - Modify `og_ai.py` directly. It is only updated by copying `ai.py` over it when a new champion is crowned.
 - Install new packages or add dependencies.
+<<<<<<< Updated upstream
 - Change the time limit. Both bots always get **50ms per move** (set via `evaluate(..., time_limit=0.05)`).
+=======
+- Change the time limit. Both bots always get **1s per move**.
+>>>>>>> Stashed changes
 
 **The goal is simple: achieve the highest win rate against the previous champion.** Everything in `ai.py` is fair game: add heuristics, change the search algorithm, improve move ordering, add an opening book, try MCTS, try neural evaluation — whatever works. The only constraint is that it runs without crashing and respects the 50ms time limit (the `Bot` base class and iterative deepening handle this).
 
@@ -143,6 +152,8 @@ LOOP FOREVER:
    - This is now the new baseline to beat.
 10. **If discarding**:
    - `git checkout ai.py` to revert back to the current champion's code.
+
+**One change per experiment**: Each commit/experiment should test exactly one thing. Don't bundle multiple independent changes (e.g. new heuristic + move ordering + candidate narrowing) into a single experiment — it's impossible to tell what helped. Change one variable at a time so results are attributable.
 
 **Crashes**: If a run crashes, use your judgment. If it's a typo or simple bug, fix and re-run. If the idea is fundamentally broken, log it as `crash`, revert, and move on.
 
