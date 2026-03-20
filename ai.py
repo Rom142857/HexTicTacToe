@@ -263,7 +263,7 @@ class MinimaxBot(Bot):
         # Update incremental eval via window counts + detect win
         st = self._score_table
         wc = self._wc
-        eval_delta = 0
+        es = self._eval_score
         won = False
         if player == Player.A:
             for d_idx, oq, or_ in _WINDOW_OFFSETS:
@@ -273,7 +273,7 @@ class MinimaxBot(Bot):
                     counts = [0, 0]
                     wc[wkey] = counts
                 a, b = counts[0], counts[1]
-                eval_delta += st[a + 1][b] - st[a][b]
+                es += st[a + 1][b] - st[a][b]
                 counts[0] = a + 1
                 if a + 1 == _WIN_LENGTH and b == 0:
                     won = True
@@ -285,11 +285,11 @@ class MinimaxBot(Bot):
                     counts = [0, 0]
                     wc[wkey] = counts
                 a, b = counts[0], counts[1]
-                eval_delta += st[a][b + 1] - st[a][b]
+                es += st[a][b + 1] - st[a][b]
                 counts[1] = b + 1
                 if b + 1 == _WIN_LENGTH and a == 0:
                     won = True
-        self._eval_score += eval_delta
+        self._eval_score = es
 
         # Update candidates: (q, r) is now occupied
         self._cand_set.discard((q, r))
@@ -330,22 +330,22 @@ class MinimaxBot(Bot):
         # Undo incremental eval via window counts
         st = self._score_table
         wc = self._wc
-        eval_delta = 0
+        es = self._eval_score
         if player == Player.A:
             for d_idx, oq, or_ in _WINDOW_OFFSETS:
                 wkey = (d_idx, q - oq, r - or_)
                 counts = wc[wkey]
                 a, b = counts[0], counts[1]
-                eval_delta += st[a - 1][b] - st[a][b]
+                es += st[a - 1][b] - st[a][b]
                 counts[0] = a - 1
         else:
             for d_idx, oq, or_ in _WINDOW_OFFSETS:
                 wkey = (d_idx, q - oq, r - or_)
                 counts = wc[wkey]
                 a, b = counts[0], counts[1]
-                eval_delta += st[a][b - 1] - st[a][b]
+                es += st[a][b - 1] - st[a][b]
                 counts[1] = b - 1
-        self._eval_score += eval_delta
+        self._eval_score = es
 
         # Undo candidates: (q, r) is empty again
         rc = self._cand_refcount
