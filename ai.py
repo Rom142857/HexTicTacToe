@@ -128,7 +128,6 @@ class MinimaxBot(Bot):
         self._hash = 0
         self._rc_stack = []
         self._history = {}
-        self._killers = {}
 
     def get_move(self, game):
         self._deadline = time.time() + self.time_limit
@@ -151,6 +150,7 @@ class MinimaxBot(Bot):
         # Build score lookup table for current player perspective.
         # _score_table[a_count][b_count] = contribution of a window with
         # that many A/B stones, from self._player's point of view.
+        # Includes defensive multipliers for asymmetric defense weighting.
         sz = _WIN_LENGTH + 1
         self._score_table = [[0] * sz for _ in range(sz)]
         for a in range(sz):
@@ -162,7 +162,7 @@ class MinimaxBot(Bot):
                 if my > 0 and opp == 0:
                     self._score_table[a][b] = LINE_SCORES[my]
                 elif opp > 0 and my == 0:
-                    self._score_table[a][b] = -LINE_SCORES[opp]
+                    self._score_table[a][b] = -int(LINE_SCORES[opp] * _DEF_MULT[opp])
 
         # Initialize incremental eval: window counts stored as dict
         # keyed by (dir_idx, start_q, start_r) -> [a_count, b_count]
@@ -427,23 +427,9 @@ class MinimaxBot(Bot):
         orig_beta = beta
         candidates = list(self._cand_set)
 
-        # Move ordering: history heuristic, then killers, then TT move to front
+        # Move ordering: history heuristic, then TT move to front
         history = self._history
         candidates.sort(key=lambda m: history.get(m, 0), reverse=True)
-        # Promote killer moves toward front (after position 0 reserved for TT)
-        killers = self._killers.get(depth)
-        if killers:
-            insert_at = 0
-            cand_set = self._cand_set
-            for km in killers:
-                if km in cand_set and km != tt_move:
-                    try:
-                        idx = candidates.index(km)
-                        if idx > insert_at:
-                            candidates[insert_at], candidates[idx] = candidates[idx], candidates[insert_at]
-                            insert_at += 1
-                    except ValueError:
-                        pass
         if tt_move in self._cand_set:
             idx = candidates.index(tt_move)
             candidates[0], candidates[idx] = candidates[idx], candidates[0]
@@ -470,15 +456,7 @@ class MinimaxBot(Bot):
                     best_move = (q, r)
                 alpha = max(alpha, value)
                 if alpha >= beta:
-                    move = (q, r)
-                    history[move] = history.get(move, 0) + depth * depth
-                    k = self._killers.get(depth)
-                    if k is None:
-                        self._killers[depth] = [move]
-                    elif move != k[0]:
-                        k.insert(0, move)
-                        if len(k) > 2:
-                            k.pop()
+                    history[(q, r)] = history.get((q, r), 0) + depth * depth
                     break
         else:
             value = math.inf
@@ -499,15 +477,7 @@ class MinimaxBot(Bot):
                     best_move = (q, r)
                 beta = min(beta, value)
                 if alpha >= beta:
-                    move = (q, r)
-                    history[move] = history.get(move, 0) + depth * depth
-                    k = self._killers.get(depth)
-                    if k is None:
-                        self._killers[depth] = [move]
-                    elif move != k[0]:
-                        k.insert(0, move)
-                        if len(k) > 2:
-                            k.pop()
+                    history[(q, r)] = history.get((q, r), 0) + depth * depth
                     break
 
         # Determine TT flag
