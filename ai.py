@@ -90,18 +90,16 @@ def evaluate_position(game, player):
 # Precomputed distance-2 offsets (18 cells, avoids hex_distance calls)
 _D2_OFFSETS = [(dq, dr) for dq in range(-2, 3) for dr in range(-2, 3)
                if hex_distance(dq, dr) <= 2 and (dq, dr) != (0, 0)]
-# Distance-3 offsets for root-only wider search
-_D3_OFFSETS = [(dq, dr) for dq in range(-3, 4) for dr in range(-3, 4)
-               if hex_distance(dq, dr) <= 3 and (dq, dr) != (0, 0)]
+_D1_OFFSETS = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1)]
 
 
-def get_candidates(game, root=False):
-    """Return empty cells within hex-distance 2 (or 3 at root) of any occupied cell."""
+def get_candidates(game, narrow=False):
+    """Return empty cells within hex-distance 2 (or 1 if narrow) of any occupied cell."""
     occupied = [pos for pos, p in game.board.items() if p != Player.NONE]
     if not occupied:
         return [(0, 0)]
 
-    offsets = _D3_OFFSETS if root else _D2_OFFSETS
+    offsets = _D1_OFFSETS if narrow else _D2_OFFSETS
     candidates = set()
     for q, r in occupied:
         for dq, dr in offsets:
@@ -134,7 +132,7 @@ class MinimaxBot(Bot):
             if p != Player.NONE:
                 self._hash ^= _zobrist[(pos[0], pos[1], p)]
 
-        candidates = get_candidates(game, root=True)
+        candidates = get_candidates(game)
         if len(candidates) == 1:
             return candidates[0]
 
@@ -246,7 +244,7 @@ class MinimaxBot(Bot):
 
         orig_alpha = alpha
         orig_beta = beta
-        candidates = get_candidates(game)
+        candidates = get_candidates(game, narrow=(depth <= 1))
 
         # Move ordering: TT move first
         if tt_move:
