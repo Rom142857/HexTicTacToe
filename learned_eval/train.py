@@ -258,32 +258,39 @@ def split_by_game(positions, val_fraction=0.2, seed=42):
 
     Positions from the same game end up in the same split, avoiding
     leakage from correlated positions within a game.
+    Falls back to a random position split if no game IDs are present.
     """
-    # Collect unique game IDs
-    game_ids = set()
-    for entry in positions:
-        if len(entry) >= 6:
-            game_ids.add(entry[5])
-        else:
-            game_ids.add(0)
+    has_game_ids = any(len(entry) >= 6 for entry in positions)
 
-    game_ids = sorted(game_ids)
     rng = np.random.RandomState(seed)
-    rng.shuffle(game_ids)
 
-    n_val = max(1, int(len(game_ids) * val_fraction))
-    val_games = set(game_ids[:n_val])
+    if has_game_ids:
+        game_ids = sorted({entry[5] for entry in positions if len(entry) >= 6})
+        rng.shuffle(game_ids)
+        n_val = max(1, int(len(game_ids) * val_fraction))
+        val_games = set(game_ids[:n_val])
 
-    train_pos = []
-    val_pos = []
-    for entry in positions:
-        gid = entry[5] if len(entry) >= 6 else 0
-        if gid in val_games:
-            val_pos.append(entry)
-        else:
-            train_pos.append(entry)
+        train_pos = []
+        val_pos = []
+        for entry in positions:
+            gid = entry[5] if len(entry) >= 6 else 0
+            if gid in val_games:
+                val_pos.append(entry)
+            else:
+                train_pos.append(entry)
 
-    print(f"Split: {len(game_ids)} games -> {len(game_ids) - n_val} train / {n_val} val")
+        print(f"Split by game: {len(game_ids)} games -> {len(game_ids) - n_val} train / {n_val} val")
+    else:
+        indices = np.arange(len(positions))
+        rng.shuffle(indices)
+        n_val = max(1, int(len(positions) * val_fraction))
+        val_set = set(indices[:n_val].tolist())
+
+        train_pos = [positions[i] for i in range(len(positions)) if i not in val_set]
+        val_pos = [positions[i] for i in val_set]
+
+        print(f"Split by position (no game IDs): {len(train_pos)} train / {len(val_pos)} val")
+
     print(f"  {len(train_pos)} train positions, {len(val_pos)} val positions")
     return train_pos, val_pos
 
