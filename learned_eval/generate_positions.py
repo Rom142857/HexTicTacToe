@@ -96,7 +96,7 @@ def play_game_collect(args):
         else:
             result = 0.0
         bk = _board_key(board_snap, cp)
-        tagged.append((bk, board_snap, cp, result))
+        tagged.append((bk, board_snap, cp, result, game_idx))
 
     return tagged
 
@@ -107,16 +107,22 @@ def _load_existing(path):
     if os.path.exists(path):
         with open(path, "rb") as f:
             positions = pickle.load(f)
-        for board, cp, w, l, d in positions:
+        for entry in positions:
+            if len(entry) == 5:
+                # Legacy format without game_id
+                board, cp, w, l, d = entry
+                game_id = 0
+            else:
+                board, cp, w, l, d, game_id = entry
             bk = _board_key(board, cp)
-            unique[bk] = [board, cp, w, l, d]
+            unique[bk] = [board, cp, w, l, d, game_id]
         print(f"Resumed: loaded {len(unique)} existing positions from {path}")
     return unique
 
 
 def _save(unique, path):
     """Save current positions to disk."""
-    positions = [(v[0], v[1], v[2], v[3], v[4]) for v in unique.values()]
+    positions = [(v[0], v[1], v[2], v[3], v[4], v[5]) for v in unique.values()]
     os.makedirs(os.path.dirname(path), exist_ok=True)
     # Write to temp file then rename for atomicity
     tmp = path + ".tmp"
@@ -158,7 +164,7 @@ def main():
                     prev_unique = len(unique)
                     games_played += 1
                     games_since_save += 1
-                    for bk, board_snap, cp, result in game_positions:
+                    for bk, board_snap, cp, result, gid in game_positions:
                         total_observations += 1
                         if bk in unique:
                             entry = unique[bk]
@@ -172,7 +178,7 @@ def main():
                             w = int(result == 1.0)
                             l = int(result == 0.0)
                             d = int(result == 0.5)
-                            unique[bk] = [board_snap, cp, w, l, d]
+                            unique[bk] = [board_snap, cp, w, l, d, gid]
 
                     new = len(unique) - prev_unique
                     pbar.update(new)

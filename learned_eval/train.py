@@ -83,7 +83,7 @@ def extract_features(board, current_player):
 def build_dataset(positions):
     """Convert positions to sparse feature matrix, target vector, and weights.
 
-    Each position has (board, current_player, wins, losses, draws).
+    Each position has (board, current_player, wins, losses, draws[, game_id]).
     Target = empirical win rate = (wins + 0.5*draws) / total.
     Weight = total observations for that position.
     """
@@ -95,7 +95,12 @@ def build_dataset(positions):
     targets = []
     weights = []
 
-    for i, (board, cp, wins, losses, draws) in enumerate(positions):
+    for i, entry in enumerate(positions):
+        if len(entry) == 5:
+            board, cp, wins, losses, draws = entry
+        else:
+            board, cp, wins, losses, draws = entry[:5]
+
         total = wins + losses + draws
         if total == 0:
             continue
@@ -116,55 +121,83 @@ def build_dataset(positions):
     weights = np.array(weights, dtype=np.float64)
     weights /= weights.mean()  # normalize so mean weight = 1
 
-    total_obs = sum(w + l + d for _, _, w, l, d in positions)
+    total_obs = sum(e[2] + e[3] + e[4] for e in positions)
     print(f"  Done in {time.time()-t0:.1f}s, {len(targets)} usable positions from {total_obs} observations")
     return feat_indices, feat_values, np.array(targets, dtype=np.float64), weights
 
 
-def train(feat_indices, feat_values, targets, weights, num_params, epochs=200, lr=0.1):
-    """Train pattern values using Adam optimizer on weighted binary cross-entropy loss.
-
-    Positions with more observations (wins+losses+draws) contribute more to the gradient.
-    """
-    params = np.zeros(num_params, dtype=np.float64)
+def _evaluate(params, feat_indices, feat_values, targets, weights):
+    """Compute loss and accuracy for a dataset."""
     n = len(targets)
+    if n == 0:
+        return 0.0, 0.0
+    evals = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        evals[i] = np.dot(params[feat_indices[i]], feat_values[i])
+    evals_clipped = np.clip(evals, -30, 30)
+    preds = 1.0 / (1.0 + np.exp(-evals_clipped))
+    preds_safe = np.clip(preds, 1e-15, 1 - 1e-15)
+    per_sample = -(targets * np.log(preds_safe) + (1 - targets) * np.log(1 - preds_safe))
+    loss = float(np.mean(weights * per_sample))
+    acc = float(np.sum((preds > 0.5) == (targets > 0.5))) / n
+    return loss, acc
+
+
+def train(train_data, val_data, num_params, epochs=200, lr=0.1, l2=0.01):
+    """Train pattern values using Adam optimizer on weighted BCE + L2 regularization.
+
+    L2 penalty shrinks rare/noisy pattern values toward zero, preventing
+    overfitting on patterns seen in only a few positions.
+    """
+    tr_idx, tr_vals, tr_targets, tr_weights = train_data
+    params = np.zeros(num_params, dtype=np.float64)
+    n = len(tr_targets)
 
     # Adam state
     m = np.zeros_like(params)
     v = np.zeros_like(params)
     beta1, beta2, eps = 0.9, 0.999, 1e-8
 
-    print(f"\nTraining {num_params} parameters on {n} positions for {epochs} epochs...")
+    val_idx, val_vals, val_targets, val_weights = val_data
+    has_val = len(val_targets) > 0
+
+    print(f"\nTraining {num_params} parameters on {n} train / {len(val_targets)} val "
+          f"for {epochs} epochs (l2={l2})...")
     t0 = time.time()
 
     for epoch in range(epochs):
-        # Forward pass: compute eval for each position
+        # Forward pass on train
         evals = np.zeros(n, dtype=np.float64)
         for i in range(n):
-            evals[i] = np.dot(params[feat_indices[i]], feat_values[i])
+            evals[i] = np.dot(params[tr_idx[i]], tr_vals[i])
 
-        # Sigmoid (clip to avoid overflow)
         evals_clipped = np.clip(evals, -30, 30)
         preds = 1.0 / (1.0 + np.exp(-evals_clipped))
 
-        # Weighted BCE loss
         preds_safe = np.clip(preds, 1e-15, 1 - 1e-15)
-        per_sample = -(targets * np.log(preds_safe) + (1 - targets) * np.log(1 - preds_safe))
-        loss = np.mean(weights * per_sample)
+        per_sample = -(tr_targets * np.log(preds_safe) + (1 - tr_targets) * np.log(1 - preds_safe))
+        bce_loss = np.mean(tr_weights * per_sample)
+        reg_loss = l2 * np.sum(params ** 2)
+        loss = bce_loss + reg_loss
 
-        # Accuracy (threshold 0.5)
-        correct = np.sum((preds > 0.5) == (targets > 0.5))
+        correct = np.sum((preds > 0.5) == (tr_targets > 0.5))
         acc = correct / n
 
         if epoch % 20 == 0 or epoch == epochs - 1:
             elapsed = time.time() - t0
-            print(f"  epoch {epoch:4d}: loss={loss:.4f}  acc={acc:.3f}  ({elapsed:.1f}s)")
+            if has_val:
+                v_loss, v_acc = _evaluate(params, val_idx, val_vals, val_targets, val_weights)
+                print(f"  epoch {epoch:4d}: train loss={bce_loss:.4f}+reg={reg_loss:.4f} acc={acc:.3f}"
+                      f"  |  val loss={v_loss:.4f} acc={v_acc:.3f}  ({elapsed:.1f}s)")
+            else:
+                print(f"  epoch {epoch:4d}: loss={bce_loss:.4f}+reg={reg_loss:.4f}  acc={acc:.3f}  ({elapsed:.1f}s)")
 
-        # Backward pass: weighted gradient
-        residuals = weights * (preds - targets) / n
+        # Backward pass: BCE gradient + L2 gradient
+        residuals = tr_weights * (preds - tr_targets) / n
         grad = np.zeros_like(params)
         for i in range(n):
-            grad[feat_indices[i]] += residuals[i] * feat_values[i]
+            grad[tr_idx[i]] += residuals[i] * tr_vals[i]
+        grad += 2 * l2 * params  # L2 gradient
 
         # Adam update
         t_adam = epoch + 1
@@ -174,7 +207,12 @@ def train(feat_indices, feat_values, targets, weights, num_params, epochs=200, l
         v_hat = v / (1 - beta2 ** t_adam)
         params -= lr * m_hat / (np.sqrt(v_hat) + eps)
 
-    print(f"\nFinal: loss={loss:.4f}  acc={acc:.3f}")
+    # Final metrics
+    if has_val:
+        v_loss, v_acc = _evaluate(params, val_idx, val_vals, val_targets, val_weights)
+        print(f"\nFinal: train loss={bce_loss:.4f} acc={acc:.3f}  |  val loss={v_loss:.4f} acc={v_acc:.3f}")
+    else:
+        print(f"\nFinal: loss={bce_loss:.4f}  acc={acc:.3f}")
     return params
 
 
@@ -215,6 +253,41 @@ def save_results(params, output_dir):
     return json_path
 
 
+def split_by_game(positions, val_fraction=0.2, seed=42):
+    """Split positions into train/val by originating game_id.
+
+    Positions from the same game end up in the same split, avoiding
+    leakage from correlated positions within a game.
+    """
+    # Collect unique game IDs
+    game_ids = set()
+    for entry in positions:
+        if len(entry) >= 6:
+            game_ids.add(entry[5])
+        else:
+            game_ids.add(0)
+
+    game_ids = sorted(game_ids)
+    rng = np.random.RandomState(seed)
+    rng.shuffle(game_ids)
+
+    n_val = max(1, int(len(game_ids) * val_fraction))
+    val_games = set(game_ids[:n_val])
+
+    train_pos = []
+    val_pos = []
+    for entry in positions:
+        gid = entry[5] if len(entry) >= 6 else 0
+        if gid in val_games:
+            val_pos.append(entry)
+        else:
+            train_pos.append(entry)
+
+    print(f"Split: {len(game_ids)} games -> {len(game_ids) - n_val} train / {n_val} val")
+    print(f"  {len(train_pos)} train positions, {len(val_pos)} val positions")
+    return train_pos, val_pos
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -222,15 +295,21 @@ def main():
     parser.add_argument("--output-dir", default=os.path.join(os.path.dirname(__file__), "results"))
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--lr", type=float, default=0.1)
+    parser.add_argument("--l2", type=float, default=0.01)
+    parser.add_argument("--val-fraction", type=float, default=0.2)
     args = parser.parse_args()
 
     with open(args.input, "rb") as f:
         positions = pickle.load(f)
     print(f"Loaded {len(positions)} positions from {args.input}")
 
-    feat_indices, feat_values, targets, weights = build_dataset(positions)
-    params = train(feat_indices, feat_values, targets, weights, NUM_CANON,
-                   epochs=args.epochs, lr=args.lr)
+    train_pos, val_pos = split_by_game(positions, val_fraction=args.val_fraction)
+
+    train_data = build_dataset(train_pos)
+    val_data = build_dataset(val_pos)
+
+    params = train(train_data, val_data, NUM_CANON,
+                   epochs=args.epochs, lr=args.lr, l2=args.l2)
     save_results(params, args.output_dir)
 
 
