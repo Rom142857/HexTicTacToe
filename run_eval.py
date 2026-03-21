@@ -31,10 +31,10 @@ def main():
     OldBot = getattr(old_mod, args.old_class)
 
     import evaluate as eval_mod
+    kwargs = dict(num_games=args.games, time_limit=args.time_limit, use_tqdm=not args.no_tqdm)
     if args.max_moves is not None:
-        eval_mod.MAX_MOVES_PER_GAME = args.max_moves
-    eval_mod.evaluate(NewBot(time_limit=args.time_limit), OldBot(time_limit=args.time_limit),
-                      num_games=args.games, time_limit=args.time_limit, use_tqdm=not args.no_tqdm)
+        kwargs['max_moves'] = args.max_moves
+    eval_mod.evaluate(NewBot(time_limit=args.time_limit), OldBot(time_limit=args.time_limit), **kwargs)
 
 
 if __name__ == "__main__":

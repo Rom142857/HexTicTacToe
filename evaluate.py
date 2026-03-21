@@ -32,13 +32,15 @@ class TimeLimitExceeded(Exception):
         super().__init__(f"{bot} exceeded time limit {violations} times")
 
 
-def play_game(bot_a, bot_b, win_length=6, violations=None):
+def play_game(bot_a, bot_b, win_length=6, violations=None, max_moves=None):
     """Play one game. Returns (winner, depth_counts_a, depth_counts_b, time_a, time_b).
 
     depth_counts maps depth -> number of moves at that depth.
     time_a/time_b are (total_seconds, num_moves) tuples.
     violations is a dict {bot: count} tracked within this game.
     """
+    if max_moves is None:
+        max_moves = MAX_MOVES_PER_GAME
     game = HexGame(win_length=win_length)
     bots = {Player.A: bot_a, Player.B: bot_b}
     depths = {Player.A: defaultdict(int), Player.B: defaultdict(int)}
@@ -75,7 +77,7 @@ def play_game(bot_a, bot_b, win_length=6, violations=None):
         depths[player][bot.last_depth] += num_moves
         total_moves += num_moves
 
-        if total_moves >= MAX_MOVES_PER_GAME:
+        if total_moves >= max_moves:
             return (Player.NONE, depths[Player.A], depths[Player.B],
                     tuple(times[Player.A]), tuple(times[Player.B]))
 
@@ -95,7 +97,7 @@ def play_game(bot_a, bot_b, win_length=6, violations=None):
 
 def _play_one(args):
     """Worker function for multiprocessing. Plays a single game."""
-    bot_a, bot_b, game_idx, win_length = args
+    bot_a, bot_b, game_idx, win_length, max_moves = args
     swapped = game_idx % 2 == 1
 
     if swapped:
@@ -106,7 +108,7 @@ def _play_one(args):
     violations = {}
     exceeded = False
     try:
-        winner, d_a, d_b, t_a, t_b = play_game(seat_a, seat_b, win_length, violations)
+        winner, d_a, d_b, t_a, t_b = play_game(seat_a, seat_b, win_length, violations, max_moves)
     except TimeLimitExceeded:
         exceeded = True
         winner = Player.NONE
@@ -129,8 +131,10 @@ def _play_one(args):
     )
 
 
-def evaluate(bot_a, bot_b, num_games=100, win_length=6, time_limit=0.1, use_tqdm=True):
+def evaluate(bot_a, bot_b, num_games=100, win_length=6, time_limit=0.1, use_tqdm=True, max_moves=None):
     """Play num_games between two bots in parallel, swapping sides each game."""
+    if max_moves is None:
+        max_moves = MAX_MOVES_PER_GAME
     bot_a.time_limit = time_limit
     bot_b.time_limit = time_limit
     bot_a_wins = 0
@@ -147,7 +151,7 @@ def evaluate(bot_a, bot_b, num_games=100, win_length=6, time_limit=0.1, use_tqdm
     game_lengths = []  # total moves per game
 
     workers = os.cpu_count() or 1
-    args = [(bot_a, bot_b, i, win_length) for i in range(num_games)]
+    args = [(bot_a, bot_b, i, win_length, max_moves) for i in range(num_games)]
 
     t0 = time.time()
 
@@ -232,7 +236,7 @@ def evaluate(bot_a, bot_b, num_games=100, win_length=6, time_limit=0.1, use_tqdm
         lo_len, hi_len = min(game_lengths), max(game_lengths)
         print(f"\n  Game length: avg {avg_len:.1f} moves, range [{lo_len}-{hi_len}]")
         bin_size = 50
-        num_bins = MAX_MOVES_PER_GAME // bin_size
+        num_bins = max_moves // bin_size
         bins = [0] * num_bins
         for gl in game_lengths:
             idx = min(gl // bin_size, num_bins - 1)
@@ -241,7 +245,7 @@ def evaluate(bot_a, bot_b, num_games=100, win_length=6, time_limit=0.1, use_tqdm
         bar_width = 30
         for i, count in enumerate(bins):
             lo = i * bin_size
-            hi = (i + 1) * bin_size - 1 if i < num_bins - 1 else MAX_MOVES_PER_GAME
+            hi = (i + 1) * bin_size - 1 if i < num_bins - 1 else max_moves
             bar = "█" * max(1, round(bar_width * count / max_count)) if count else ""
             print(f"    {lo:3d}-{hi:3d}: {bar} {count}")
 
