@@ -16,7 +16,7 @@ from bot import Bot
 from game import Player, HEX_DIRECTIONS
 
 # ── Hyperparameters ──────────────────────────────────────────────────
-LINE_SCORES = [0, 0, 5, 1000, 2000, 50000, 100000]  # eval score per stone count in a window
+LINE_SCORES = [0, 0, 5, 1000, 2000, 75000, 100000]  # eval score per stone count in a window
 _DEF_MULT = [0, 1.0, 1.0, 1.0, 1.5, 2.0, 1.0]      # defensive multiplier: extra weight on blocking 4/5-in-a-row
 _CANDIDATE_CAP = 15          # max single-cell candidates in minimax
 _ROOT_CANDIDATE_CAP = 15     # max single-cell candidates at root
@@ -683,8 +683,8 @@ class MinimaxBot(Bot):
                     best_move = turn
                 alpha = max(alpha, value)
                 if alpha >= beta:
-                    history[turn[0]] = history.get(turn[0], 0) + depth * depth * depth
-                    history[turn[1]] = history.get(turn[1], 0) + depth * depth * depth
+                    history[turn[0]] = history.get(turn[0], 0) + depth * depth
+                    history[turn[1]] = history.get(turn[1], 0) + depth * depth
                     break
         else:
             value = math.inf
@@ -700,8 +700,8 @@ class MinimaxBot(Bot):
                     best_move = turn
                 beta = min(beta, value)
                 if alpha >= beta:
-                    history[turn[0]] = history.get(turn[0], 0) + depth * depth * depth
-                    history[turn[1]] = history.get(turn[1], 0) + depth * depth * depth
+                    history[turn[0]] = history.get(turn[0], 0) + depth * depth
+                    history[turn[1]] = history.get(turn[1], 0) + depth * depth
                     break
 
         if value <= orig_alpha:
