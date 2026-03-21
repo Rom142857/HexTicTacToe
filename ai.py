@@ -16,7 +16,7 @@ from bot import Bot
 from game import Player, HEX_DIRECTIONS
 
 # ── Hyperparameters ──────────────────────────────────────────────────
-LINE_SCORES = [0, 1, 10, 200, 1500, 10000, 100000]  # eval score per stone count in a window
+LINE_SCORES = [0, 1, 10, 200, 2000, 10000, 100000]  # eval score per stone count in a window
 _DEF_MULT = [0, 0.8, 0.8, 1.2, 1.5, 3.0, 1.0]      # defensive multiplier per opponent count
 _CANDIDATE_CAP = 15          # max single-cell candidates in minimax
 _ROOT_CANDIDATE_CAP = 15     # max single-cell candidates at root
