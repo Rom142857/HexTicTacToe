@@ -18,8 +18,8 @@ from game import Player, HEX_DIRECTIONS
 # ── Hyperparameters ──────────────────────────────────────────────────
 LINE_SCORES = [0, 0, 5, 1000, 2000, 50000, 100000]  # eval score per stone count in a window
 _DEF_MULT = [0, 1.0, 1.0, 1.0, 1.5, 2.0, 1.0]      # defensive multiplier: extra weight on blocking 4/5-in-a-row
-_CANDIDATE_CAP = 11          # max single-cell candidates in minimax
-_ROOT_CANDIDATE_CAP = 12     # max single-cell candidates at root
+_CANDIDATE_CAP = 10          # max single-cell candidates in minimax
+_ROOT_CANDIDATE_CAP = 13     # max single-cell candidates at root
 _NEIGHBOR_DIST = 1           # hex distance for candidate generation
 _DELTA_WEIGHT = 1.5          # weight of eval delta vs history in move ordering
 
