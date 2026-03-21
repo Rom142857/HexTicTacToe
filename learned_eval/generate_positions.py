@@ -30,7 +30,7 @@ SAVE_INTERVAL = 50  # save every N batches
 
 def _board_key(board, current_player):
     """Hashable key for a (board, current_player) pair."""
-    return (frozenset(board.items()), current_player)
+    return hash((frozenset(board.items()), current_player))
 
 
 def play_game_collect(args):
@@ -53,11 +53,6 @@ def play_game_collect(args):
         cp = game.current_player
 
         seen = board_snap and _board_key(board_snap, cp) in seen_keys
-
-        # Compute eval before making moves
-        if board_snap and not seen:
-            eval_score = evaluate_position(game, cp)
-            positions.append((board_snap, cp, eval_score))
 
         # Always get the bot's moves
         bot = bot_a if cp == Player.A else bot_b

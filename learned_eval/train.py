@@ -289,44 +289,6 @@ def split_by_game(positions, val_fraction=0.2, seed=42):
     return train_pos, val_pos
 
 
-def subsample_by_game(positions, samples_per_game=4, seed=42):
-    """Subsample positions: pick a few spread across each game's timeline.
-
-    Groups positions by game_id, sorts by board size (proxy for game progress),
-    and picks evenly-spaced positions. This avoids redundant correlated
-    positions from the same game dominating training.
-    """
-    from collections import defaultdict
-    rng = np.random.RandomState(seed)
-
-    # Group by game_id
-    by_game = defaultdict(list)
-    for entry in positions:
-        game_id = entry[3]
-        by_game[game_id].append(entry)
-
-    # Sort each game's positions by board size (game progress)
-    for gid in by_game:
-        by_game[gid].sort(key=lambda e: len(e[0]))
-
-    # Sample evenly-spaced positions from each game
-    sampled = []
-    for gid, game_positions in by_game.items():
-        n = len(game_positions)
-        if n <= samples_per_game:
-            sampled.extend(game_positions)
-        else:
-            # Pick evenly spaced indices
-            indices = np.linspace(0, n - 1, samples_per_game, dtype=int)
-            for idx in indices:
-                sampled.append(game_positions[idx])
-
-    rng.shuffle(sampled)
-    print(f"Subsampled: {len(positions)} -> {len(sampled)} positions "
-          f"({len(by_game)} games, ~{samples_per_game}/game)")
-    return sampled
-
-
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -336,14 +298,11 @@ def main():
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--l2", type=float, default=0.001)
     parser.add_argument("--val-fraction", type=float, default=0.2)
-    parser.add_argument("--samples-per-game", type=int, default=4)
     args = parser.parse_args()
 
     with open(args.input, "rb") as f:
         positions = pickle.load(f)
     print(f"Loaded {len(positions)} positions from {args.input}")
-
-    positions = subsample_by_game(positions, samples_per_game=args.samples_per_game)
 
     train_pos, val_pos = split_by_game(positions, val_fraction=args.val_fraction)
 
