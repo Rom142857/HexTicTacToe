@@ -127,6 +127,8 @@ def _save(unique, path):
 
 def main():
     import argparse
+    from tqdm import tqdm
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--time-limit", type=float, default=0.05)
     parser.add_argument("--target", type=int, default=TARGET_POSITIONS)
@@ -140,23 +142,22 @@ def main():
     total_observations = sum(v[2] + v[3] + v[4] for v in unique.values())
     games_played = 0
     game_idx = int(time.time() * 1000) % 1_000_000  # unique seed base on resume
-    t0 = time.time()
-    batches_since_save = 0
+    games_since_save = 0
 
-    print(f"Target: {args.target} unique positions, {workers} workers, "
-          f"time_limit={args.time_limit}s, batch_size={batch_size}")
-    print(f"Starting with {len(unique)} unique positions, {total_observations} observations")
+    pbar = tqdm(total=args.target, initial=len(unique), unit="pos", desc="Unique positions")
 
     try:
-        while len(unique) < args.target:
-            seen_keys = frozenset(unique.keys())
-            task_args = [(args.time_limit, game_idx + i, seen_keys)
-                         for i in range(batch_size)]
-            game_idx += batch_size
+        with Pool(workers) as pool:
+            while len(unique) < args.target:
+                seen_keys = frozenset(unique.keys())
+                task_args = [(args.time_limit, game_idx + i, seen_keys)
+                             for i in range(batch_size)]
+                game_idx += batch_size
 
-            with Pool(min(workers, batch_size)) as pool:
                 for game_positions in pool.imap_unordered(play_game_collect, task_args):
+                    prev_unique = len(unique)
                     games_played += 1
+                    games_since_save += 1
                     for bk, board_snap, cp, result in game_positions:
                         total_observations += 1
                         if bk in unique:
@@ -173,28 +174,27 @@ def main():
                             d = int(result == 0.5)
                             unique[bk] = [board_snap, cp, w, l, d]
 
-            batches_since_save += 1
-            elapsed = time.time() - t0
-            print(f"  {games_played} games, {len(unique)} unique positions "
-                  f"({total_observations} obs, {elapsed:.0f}s)")
+                    new = len(unique) - prev_unique
+                    pbar.update(new)
+                    pbar.set_postfix(games=games_played, obs=total_observations,
+                                    dedup=f"{total_observations / max(len(unique), 1):.1f}x")
 
-            if batches_since_save >= SAVE_INTERVAL:
-                _save(unique, args.output)
-                batches_since_save = 0
-                print(f"  [saved to {args.output}]")
+                if games_since_save >= SAVE_INTERVAL * batch_size:
+                    _save(unique, args.output)
+                    games_since_save = 0
 
     except KeyboardInterrupt:
         print(f"\n\nInterrupted! Saving {len(unique)} positions...")
 
+    pbar.close()
     _save(unique, args.output)
 
-    elapsed = time.time() - t0
     total_wins = sum(v[2] for v in unique.values())
     total_losses = sum(v[3] for v in unique.values())
     total_draws = sum(v[4] for v in unique.values())
 
     print(f"\nCollected {len(unique)} unique positions from {total_observations} observations "
-          f"in {games_played} games ({elapsed:.1f}s)")
+          f"in {games_played} games")
     print(f"  Win observations: {total_wins}, Loss: {total_losses}, Draw: {total_draws}")
     print(f"  Dedup ratio: {total_observations / max(len(unique), 1):.2f}x")
     print(f"Saved to {args.output}")
