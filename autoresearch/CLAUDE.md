@@ -15,7 +15,7 @@ You are launched from `autoresearch/`, but all game files (`ai.py`, `game.py`, `
 
 ## Game rules
 
-Hex Tic-Tac-Toe is played on a hexagonal board of radius 5 (91 cells) using axial coordinates. Two players (A and B) take turns placing stones:
+Hex Tic-Tac-Toe is played on a hexagonal board of infinite size using axial coordinates. Two players (A and B) take turns placing stones:
 
 - **Turn order**: Player A places **1** stone first. After that, players alternate placing **2** stones each (B gets 2, then A gets 2, then B gets 2, ...). The 1-then-2-2-2 structure balances first-move advantage.
 - **Win condition**: First player to get **6 in a row** along any of the three hex axes wins.
@@ -44,7 +44,7 @@ Once you get confirmation, kick off the experimentation.
 
 ## Experimentation
 
-Each experiment is an edit to `ai.py` followed by a head-to-head evaluation against the champion (`og_ai.py`). Evaluation runs **400 games** (sides swapped each game) with a **0.1s time limit per move** for both bots.
+Each experiment is an edit to `ai.py` followed by a correctness and speed test for time based changes, and always a head-to-head evaluation against the champion (`og_ai.py`) to make sure everything works. Evaluation runs **400 games** (sides swapped each game) with a **0.1s time limit per move** for both bots.
 
 You launch an evaluation like this:
 
@@ -63,17 +63,47 @@ Full options: `--new-module`, `--new-class`, `--old-module`, `--old-class`, `--g
 `og_ai.py` must always be importable — never modify it directly.
 
 **What you CAN do:**
-- Modify `ai.py` — this is the only file you edit. Everything is fair game: search algorithm, heuristics, move ordering, candidate generation, evaluation function, time management, etc.
+- Modify `ai.py` — this is the only file you edit.
+- **Speed optimizations**: Make the bot faster so it searches deeper in the same time. These must produce identical output to the current champion — run `python ../test_correctness.py` to verify before evaluating.
+- **Hyperparameter tuning**: Adjust numeric values (LINE_SCORES, defensive multipliers, candidate caps, etc.) to find better settings.
 
 **What you CANNOT do:**
+- **Change the architecture.** Do not add new search algorithms, new heuristic systems, new data structures for the search, or fundamentally restructure the bot. The architecture is locked — only speed and tuning.
 - Modify `game.py`, `bot.py`, or `evaluate.py`. They are read-only.
 - Modify `og_ai.py` directly. It is only updated by copying `ai.py` over it when a new champion is crowned.
 - Install new packages or add dependencies.
 - Change the time limit. Both bots always get **0.1s per move**.
 
-**The goal is simple: achieve the highest win rate against the previous champion.** Everything in `ai.py` is fair game: add heuristics, change the search algorithm, improve move ordering, add an opening book, try MCTS, try neural evaluation — whatever works. The only constraint is that it runs without crashing and respects the 50ms time limit (the `Bot` base class and iterative deepening handle this).
+## Two optimization tracks
 
-**Simplicity criterion**: All else being equal, simpler is better. A marginal win-rate improvement that adds ugly complexity is not worth it. Removing something and getting equal or better results is a great outcome. Weigh the complexity cost against the improvement magnitude.
+### Track 1: Speed optimizations
+The goal is to make the existing code run faster so the bot searches deeper within the same time limit. Speed optimizations must **not change the bot's decisions** — they must produce identical moves to the champion at the same depth.
+
+**Workflow for speed changes:**
+1. Make the speed optimization in `ai.py`
+2. Run `python ../test_correctness.py` to verify identical output to `og_ai.py`
+3. Run `python ../test_profile.py --competition` to run ai.py vs og_ai.py head-to-head and confirm the speed change actually helps
+4. If correctness passes, run `python ../run_eval.py` to measure improvement via full evaluation
+5. The win should come from deeper search, not different evaluation
+
+Check `autoresearch/ideas.md` for speed ideas to try.
+
+### Track 2: Hyperparameter tuning
+The goal is to find optimal values for existing numeric parameters.
+
+**Tuning strategy:**
+1. Pick a parameter to tune (e.g., a LINE_SCORE value, a defensive multiplier, a candidate cap)
+2. Try changing it in one direction (e.g., increase by ~20-50%)
+3. If that fails (win rate < 55%), try the other direction (decrease)
+4. If both directions fail, try smaller step sizes
+5. If small steps also fail, conclude the current value is at or near optimal and move on
+6. If a direction works, keep pushing further in that direction until it stops helping
+
+**The goal is simple: achieve the highest win rate against the previous champion** through speed optimizations and hyperparameter tuning only. The architecture is locked — no new algorithms, heuristics, or structural changes.
+
+**og_ai.py is your safeguard**: `og_ai.py` always holds the current best bot. Never modify it directly — only update it by copying `ai.py` over it when a new champion is crowned. This ensures you always have a known-good baseline to compare against and revert to.
+
+**Simplicity criterion**: All else being equal, simpler is better. A marginal speed improvement that adds ugly complexity is not worth it. Removing something and getting equal or better speed is a great outcome. Weigh the complexity cost against the improvement magnitude.
 
 **One evaluation at a time**: Evaluations use all CPU cores via multiprocessing. Never run multiple evaluations in parallel — always wait for one to finish before starting the next, even during parameter sweeps.
 
@@ -138,11 +168,12 @@ LOOP FOREVER:
 4. Run the evaluation: `python ../run_eval.py` — output goes straight into context, no log file needed.
 5. If the output is empty or shows a traceback, the run crashed. Attempt a fix. If you can't get things to work after a few attempts, give up on this idea.
 7. Record the results in the tsv. (NOTE: do not commit results.tsv — leave it untracked.)
-8. **Decide whether to keep or discard.** Use judgment, not a hard cutoff. A win rate around **55%+** is a clear improvement — keep it. But context matters:
-   - A simplification that wins 51%? Keep it — simpler code at equal strength is a win.
-   - A complex change that wins 53%? Probably noise — discard unless you have strong reason to believe it's real.
-   - A radical rewrite that wins 48%? Might still be worth keeping if it opens up new avenues, but usually discard.
-   - When in doubt, 55% is a good rule of thumb for "meaningfully stronger."
+8. **Decide whether to keep or discard.** The threshold depends on the type of change:
+   - **Speed optimizations**: Be forgiving — **45%+ win rate is fine**, but only if `test_correctness.py` passes AND `test_profile.py --competition` shows a clear speed improvement. If either of those don't confirm the change, or win rate is below 45%, something may have gone wrong; investigate or revert.
+   - **Hyperparameter tuning**: A win rate around **55%+** is a clear improvement — keep it. But context matters:
+     - A simplification that wins 51%? Keep it — simpler code at equal strength is a win.
+     - A complex change that wins 53%? Probably noise — discard unless you have strong reason to believe it's real.
+     - When in doubt, 55% is a good rule of thumb for "meaningfully stronger."
 9. **If keeping**: the new bot is champion.
    - Copy `ai.py` to `og_ai.py` (replacing the old champion).
    - git commit `og_ai.py` with a message like "promote: <description>".
@@ -154,8 +185,6 @@ LOOP FOREVER:
 
 **Crashes**: If a run crashes, use your judgment. If it's a typo or simple bug, fix and re-run. If the idea is fundamentally broken, log it as `crash`, revert, and move on.
 
-**Suspiciously flat results**: If you're confident a change should help but the win rate is ~50%, suspect a bug — maybe the new code path isn't being reached, a sign is flipped, or a value is being overwritten. Investigate and re-run. However, spend a **maximum of 3 experiments per idea**. If it's still not working after 3 attempts, log the idea and what you tried in `ideas.md` and move on.
-
 **NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep or away and expects you to continue working *indefinitely* until manually stopped. You are autonomous. If you run out of ideas, think harder — re-read the game logic for new angles, research hex game heuristics, try combining previous near-misses, try radically different approaches. The loop runs until the human interrupts you, period.
 
-As an example use case, a user might leave you running while they sleep. Each experiment takes ~30 seconds to evaluate, so you can run many iterations per hour. The user wakes up to a much stronger bot, all improved autonomously while they slept.
+As an example use case, a user might leave you running while they sleep. Each experiment takes ~5 minutes to evaluate, so you can run many iterations per hour. The user wakes up to a much stronger bot, all improved autonomously while they slept.

@@ -48,12 +48,12 @@ _WINDOW_OFFSETS = tuple(
 # Direction vectors indexed by dir_index
 _DIR_VECTORS = tuple(HEX_DIRECTIONS)
 
-# Pre-compute the 18 neighbor offsets within hex-distance 2 (excluding self)
+# Pre-compute the 6 neighbor offsets within hex-distance 1 (excluding self)
 _NEIGHBOR_OFFSETS_2 = tuple(
     (dq, dr)
     for dq in range(-2, 3)
     for dr in range(-2, 3)
-    if hex_distance(dq, dr) <= 2 and (dq, dr) != (0, 0)
+    if hex_distance(dq, dr) <= 1 and (dq, dr) != (0, 0)
 )
 
 # TT entry flags
@@ -62,6 +62,8 @@ _LOWER = 1  # true value >= stored (beta cutoff)
 _UPPER = 2  # true value <= stored (failed low)
 
 _WIN_SCORE = 100000000
+_CANDIDATE_CAP = 15
+_ROOT_CANDIDATE_CAP = 15
 
 
 def evaluate_position(game, player):
@@ -250,6 +252,9 @@ class MinimaxBot(Bot):
                     self.last_ebf = round(nodes_this_depth ** (1.0 / depth), 1)
                 # Reorder turns by score for next iteration
                 turns.sort(key=lambda t: scores.get(t, 0), reverse=maximizing)
+                # Stop if forced win/loss found
+                if abs(scores.get(result, 0)) >= _WIN_SCORE:
+                    break
             except TimeUp:
                 game.board = saved_board
                 game.move_count = saved_move_count
@@ -405,6 +410,72 @@ class MinimaxBot(Bot):
                     delta += new_w
         return delta
 
+    def _find_instant_win(self, game, player):
+        """Find a winning turn if player can complete a window in one turn (2 stones).
+
+        Checks for windows with 4 or 5 stones and 0 opponent — filling
+        the remaining 2 or 1 empties in a single turn wins immediately.
+        Returns a (cell1, cell2) turn tuple, or None.
+        """
+        p_idx = 0 if player == Player.A else 1
+        o_idx = 1 - p_idx
+        board = game.board
+        for wkey, counts in self._wc.items():
+            if counts[p_idx] >= _WIN_LENGTH - 2 and counts[o_idx] == 0:
+                empties = counts[p_idx] == _WIN_LENGTH - 2  # expect 2 empties
+                d_idx, sq, sr = wkey
+                dq, dr = _DIR_VECTORS[d_idx]
+                cells = []
+                for j in range(_WIN_LENGTH):
+                    cell = (sq + j * dq, sr + j * dr)
+                    if cell not in board:
+                        cells.append(cell)
+                if len(cells) == 1:
+                    # 5 of 6: pair with any candidate
+                    other = next((c for c in self._cand_set if c != cells[0]), cells[0])
+                    return (min(cells[0], other), max(cells[0], other))
+                elif len(cells) == 2:
+                    # 4 of 6: play both empties
+                    return (min(cells[0], cells[1]), max(cells[0], cells[1]))
+        return None
+
+    def _find_threat_cells(self, game, player):
+        """Return set of empty cells in windows where player has 4 and opponent has 0."""
+        threat_cells = set()
+        p_idx = 0 if player == Player.A else 1
+        o_idx = 1 - p_idx
+        board = game.board
+        for wkey, counts in self._wc.items():
+            if counts[p_idx] >= 4 and counts[o_idx] == 0:
+                d_idx, sq, sr = wkey
+                dq, dr = _DIR_VECTORS[d_idx]
+                for j in range(_WIN_LENGTH):
+                    cell = (sq + j * dq, sr + j * dr)
+                    if cell not in board:
+                        threat_cells.add(cell)
+        return threat_cells
+
+    def _filter_turns_by_threats(self, game, turns):
+        """Filter turns to forced moves when threats of four exist."""
+        current = game.current_player
+        opponent = Player.B if current == Player.A else Player.A
+
+        my_threats = self._find_threat_cells(game, current)
+        if my_threats:
+            winning = [t for t in turns
+                       if t[0] in my_threats or t[1] in my_threats]
+            if winning:
+                return winning
+
+        opp_threats = self._find_threat_cells(game, opponent)
+        if opp_threats:
+            blocking = [t for t in turns
+                        if t[0] in opp_threats or t[1] in opp_threats]
+            if blocking:
+                return blocking
+
+        return turns
+
     def _make_turn(self, game, turn):
         """Apply a full turn (2 stones). Returns undo info list."""
         m1, m2 = turn
@@ -426,6 +497,11 @@ class MinimaxBot(Bot):
 
     def _generate_turns(self, game):
         """Generate C(N,2) turn pairs, ordered by sorting singles first."""
+        # Instant win: current player can complete a window in one turn
+        win_turn = self._find_instant_win(game, game.current_player)
+        if win_turn:
+            return [win_turn]
+
         candidates = list(self._cand_set)
         if len(candidates) < 2:
             if candidates:
@@ -438,11 +514,13 @@ class MinimaxBot(Bot):
 
         # Sort singles by delta — pairs from combinations inherit good ordering
         candidates.sort(key=lambda c: move_delta(c[0], c[1], is_a), reverse=maximizing)
+        candidates = candidates[:_ROOT_CANDIDATE_CAP]
 
-        return list(combinations(candidates, 2))
+        turns = list(combinations(candidates, 2))
+        return self._filter_turns_by_threats(game, turns)
 
     def _search_root(self, game, turns, depth):
-        """Search all root turns. Returns (best_turn, {turn: score})."""
+        """Search all root turns, narrowing alpha-beta window as we go."""
         maximizing = game.current_player == self._player
         best_turn = turns[0]
         alpha = -math.inf
@@ -501,6 +579,60 @@ class MinimaxBot(Bot):
             self._tt[tt_key] = (0, score, _EXACT, None)
             return score
 
+        # Instant win: skip full turn generation
+        win_turn = self._find_instant_win(game, game.current_player)
+        if win_turn:
+            undo_info = self._make_turn(game, win_turn)
+            score = _WIN_SCORE if game.winner == self._player else -_WIN_SCORE
+            self._undo_turn(game, undo_info)
+            self._tt[tt_key] = (depth, score, _EXACT, win_turn)
+            return score
+
+        # Instant loss: opponent wins next turn and we can't block all threats
+        opponent = Player.B if game.current_player == Player.A else Player.A
+        opp_win = self._find_instant_win(game, opponent)
+        if opp_win:
+            # Opponent has at least one winning window — check if we can block.
+            # Collect all opponent threat windows (4+ of 6) to find distinct
+            # windows that each need at least one cell blocked.
+            opp_threats = self._find_threat_cells(game, opponent)
+            # We get 2 moves — count how many independent windows need blocking.
+            # Each window with 4-of-6 needs one of its 2 empties blocked;
+            # each window with 5-of-6 needs its 1 empty blocked.
+            # If the threat cells can't all be covered by 2 moves, we lose.
+            p_idx = 0 if opponent == Player.A else 1
+            o_idx = 1 - p_idx
+            # Collect sets of empties per threat window — must hit at least one per window
+            must_hit = []
+            board = game.board
+            for wkey, counts in self._wc.items():
+                if counts[p_idx] >= _WIN_LENGTH - 2 and counts[o_idx] == 0:
+                    d_idx, sq, sr = wkey
+                    dq, dr = _DIR_VECTORS[d_idx]
+                    empties = frozenset(
+                        (sq + j * dq, sr + j * dr)
+                        for j in range(_WIN_LENGTH)
+                        if (sq + j * dq, sr + j * dr) not in board
+                    )
+                    must_hit.append(empties)
+            if len(must_hit) > 1:
+                # Check if any pair of cells hits all windows
+                can_block = False
+                all_cells = set()
+                for s in must_hit:
+                    all_cells |= s
+                for c1 in all_cells:
+                    for c2 in all_cells:
+                        if all(c1 in w or c2 in w for w in must_hit):
+                            can_block = True
+                            break
+                    if can_block:
+                        break
+                if not can_block:
+                    score = -_WIN_SCORE if opponent != self._player else _WIN_SCORE
+                    self._tt[tt_key] = (depth, score, _EXACT, None)
+                    return score
+
         orig_alpha = alpha
         orig_beta = beta
         maximizing = game.current_player == self._player
@@ -526,8 +658,10 @@ class MinimaxBot(Bot):
             candidates.sort(
                 key=lambda c: history.get(c, 0) + move_delta(c[0], c[1], is_a) * delta_sign,
                 reverse=True)
+            candidates = candidates[:_CANDIDATE_CAP]
 
             turns = list(combinations(candidates, 2))
+            turns = self._filter_turns_by_threats(game, turns)
 
         # TT move to front
         if tt_move is not None:

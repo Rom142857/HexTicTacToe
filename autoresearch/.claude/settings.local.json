@@ -2,6 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(python ../run_eval.py*)",
+      "Bash(python ../test_correctness.py*)",
+      "Bash(python ../test_profile.py*)",
       "Bash(python ../test.py*)",
       "Bash(tail ../*)",
       "Bash(cp ../ai.py ../og_ai.py)",
