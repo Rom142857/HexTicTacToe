@@ -21,7 +21,13 @@
       "Read",
       "Bash(python -c \":*)",
       "Bash(cd:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(printf:*)",
+      "Bash(PYTHONIOENCODING=utf-8 python ../run_eval.py)",
+      "Bash(PYTHONIOENCODING=utf-8 python ../run_eval.py --no-tqdm)",
+      "Bash(PYTHONIOENCODING=utf-8 python ../run_eval.py --no-tqdm --max-moves 300)",
+      "Bash(PYTHONIOENCODING=utf-8 python ../run_eval.py --old-module original_ai --no-tqdm)",
+      "Bash(git merge:*)"
     ],
     "deny": [
       "Bash(git push*)",

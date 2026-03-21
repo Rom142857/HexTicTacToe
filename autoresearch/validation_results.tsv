@@ -1,0 +1,12 @@
+test	max_moves	win_rate	draw_rate	avg_depth_new	avg_depth_old	result	description
+1	400	0.84	0.06	2.4	2.1	confirmed	champion vs original_ai.py (80-13-6%)
+2	400	0.05	0.02	2.4	2.5	confirmed-discard	history bonus depth^3 (clearly worse)
+3	400	0.49	0.02	2.4	2.4	confirmed-discard	LINE_SCORES[5]=75000 (even, no help)
+4	400	0.49	0.02	2.4	2.4	confirmed-discard	TT clear 500K (even, no help)
+5	400	0.48	0.00	2.4	2.4	confirmed-keep	_DELTA_WEIGHT=1.0 vs 1.5 (champ 52%, small edge)
+6	400	0.12	0.05	2.5	2.5	confirmed-keep	LINE_SCORES[3]=1000 vs 1200 (champ 86%, strong)
+7	400	0.49	0.00	2.4	2.4	marginal-keep	LINE_SCORES[2]=5 vs 8 (basically even)
+8	400	0.49	0.02	2.4	2.4	marginal-keep	LINE_SCORES[5]=10000 vs 50000 (basically even)
+9	400	0.73	0.08	2.4	2.4	REVERT-NEEDED	DEF_MULT all 1.0 beats champ 1.8/2.5 (70-23-8%)
+10	400	0.84	0.02	2.5	2.5	REVERT-NEEDED	LINE_SCORES[4]=1000 beats champ 3000 (82-16-2%)
+11	400	0.96	0.00	2.3	2.6	REVERT-NEEDED	combined LS4=1000+DEF_MULT=1.0 (96-4-0%)
