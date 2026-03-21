@@ -306,7 +306,7 @@ class MinimaxBot(Bot):
                 a, b = counts[0], counts[1]
                 self._eval_score += st[a + 1][b] - st[a][b]
                 counts[0] = a + 1
-                if a == 3:  # transitioning to hot
+                if a + 1 >= 4:
                     hot_a.add(wkey)
                 if a + 1 == _WIN_LENGTH and b == 0:
                     won = True
@@ -321,7 +321,7 @@ class MinimaxBot(Bot):
                 a, b = counts[0], counts[1]
                 self._eval_score += st[a][b + 1] - st[a][b]
                 counts[1] = b + 1
-                if b == 3:  # transitioning to hot
+                if b + 1 >= 4:
                     hot_b.add(wkey)
                 if b + 1 == _WIN_LENGTH and a == 0:
                     won = True
@@ -373,7 +373,7 @@ class MinimaxBot(Bot):
                 a, b = counts[0], counts[1]
                 self._eval_score += st[a - 1][b] - st[a][b]
                 counts[0] = a - 1
-                if a == 4:  # was hot, now not
+                if a - 1 < 4:
                     hot_a.discard(wkey)
         else:
             hot_b = self._hot_b
@@ -383,7 +383,7 @@ class MinimaxBot(Bot):
                 a, b = counts[0], counts[1]
                 self._eval_score += st[a][b - 1] - st[a][b]
                 counts[1] = b - 1
-                if b == 4:  # was hot, now not
+                if b - 1 < 4:
                     hot_b.discard(wkey)
 
         # Undo candidates: (q, r) is empty again
@@ -540,7 +540,7 @@ class MinimaxBot(Bot):
         candidates.sort(key=lambda c: move_delta(c[0], c[1], is_a), reverse=maximizing)
         candidates = candidates[:_ROOT_CANDIDATE_CAP]
 
-        turns = list(combinations(candidates, 2))
+        turns = [(candidates[i], candidates[j]) for i in range(len(candidates)) for j in range(i + 1, len(candidates))]
         return self._filter_turns_by_threats(game, turns)
 
     def _search_root(self, game, turns, depth):
@@ -687,7 +687,7 @@ class MinimaxBot(Bot):
                 reverse=True)
             candidates = candidates[:_CANDIDATE_CAP]
 
-            turns = list(combinations(candidates, 2))
+            turns = [(candidates[i], candidates[j]) for i in range(len(candidates)) for j in range(i + 1, len(candidates))]
             turns = self._filter_turns_by_threats(game, turns)
 
         # TT move to front
