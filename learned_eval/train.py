@@ -332,7 +332,15 @@ def main():
         print(f"Training on game outcomes (entry[{target_idx}])")
     else:
         target_idx = 2
-        print(f"Training on evaluator scores (entry[2])")
+        print(f"Training on search scores (entry[2])")
+
+    # Exclude solved positions (forced win/loss from minimax)
+    WIN_SCORE = 100000000
+    before = len(positions)
+    positions = [p for p in positions if abs(p[target_idx]) < WIN_SCORE]
+    excluded = before - len(positions)
+    if excluded:
+        print(f"Excluded {excluded} solved positions (|score| >= {WIN_SCORE}), {len(positions)} remaining")
 
     train_pos, val_pos = split_by_game(positions, val_fraction=args.val_fraction)
 
