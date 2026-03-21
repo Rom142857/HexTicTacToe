@@ -1,12 +1,12 @@
-"""Pattern table for 8-cell hex window evaluation with symmetry reduction.
+"""Pattern table for 6-cell hex window evaluation with symmetry reduction.
 
-Each window is 8 cells along a hex axis. Cell states: 0=empty, 1=A, 2=B.
+Each window is 6 cells along a hex axis. Cell states: 0=empty, 1=A, 2=B.
 Symmetries:
   - Flipping (reverse): same value
   - Piece swap (1<->2): negated value
 """
 
-WINDOW_LENGTH = 8
+WINDOW_LENGTH = 6
 NUM_PATTERNS = 3 ** WINDOW_LENGTH  # 6561 including all-empty
 
 
