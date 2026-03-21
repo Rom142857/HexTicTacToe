@@ -80,9 +80,15 @@ class DepthLimitedNew(ai_new.MinimaxBot):
                     self._wc[wkey] = [a_count, b_count]
 
         self._eval_score = 0
+        self._hot_a = set()
+        self._hot_b = set()
         st = self._score_table
-        for counts in self._wc.values():
+        for wkey, counts in self._wc.items():
             self._eval_score += st[counts[0]][counts[1]]
+            if counts[0] >= 4:
+                self._hot_a.add(wkey)
+            if counts[1] >= 4:
+                self._hot_b.add(wkey)
 
         # Candidates
         self._cand_refcount = {}

@@ -199,11 +199,17 @@ class MinimaxBot(Bot):
                 if a_count > 0 or b_count > 0:
                     self._wc[wkey] = [a_count, b_count]
 
-        # Compute initial eval score from window counts
+        # Compute initial eval score from window counts + hot window sets
         self._eval_score = 0
+        self._hot_a = set()  # windows where A has >= 4
+        self._hot_b = set()  # windows where B has >= 4
         st = self._score_table
-        for counts in self._wc.values():
+        for wkey, counts in self._wc.items():
             self._eval_score += st[counts[0]][counts[1]]
+            if counts[0] >= 4:
+                self._hot_a.add(wkey)
+            if counts[1] >= 4:
+                self._hot_b.add(wkey)
 
         # Initialize incremental candidate set with reference counting.
         self._cand_refcount = {}
@@ -236,6 +242,8 @@ class MinimaxBot(Bot):
         saved_wc = {k: v[:] for k, v in self._wc.items()}
         saved_cand_set = set(self._cand_set)
         saved_cand_rc = dict(self._cand_refcount)
+        saved_hot_a = set(self._hot_a)
+        saved_hot_b = set(self._hot_b)
 
         for depth in range(1, 200):
             try:
@@ -261,13 +269,15 @@ class MinimaxBot(Bot):
                 self._wc = saved_wc
                 self._cand_set = saved_cand_set
                 self._cand_refcount = saved_cand_rc
+                self._hot_a = saved_hot_a
+                self._hot_b = saved_hot_b
                 break
 
         return best_move
 
     def _check_time(self):
         self._nodes += 1
-        if self._nodes % 2048 == 0 and time.time() >= self._deadline:
+        if self._nodes % 1024 == 0 and time.time() >= self._deadline:
             raise TimeUp
 
     def _make(self, game, q, r):
@@ -286,6 +296,7 @@ class MinimaxBot(Bot):
         wc = self._wc
         won = False
         if player == Player.A:
+            hot_a = self._hot_a
             for d_idx, oq, or_ in _WINDOW_OFFSETS:
                 wkey = (d_idx, q - oq, r - or_)
                 counts = wc.get(wkey)
@@ -295,9 +306,12 @@ class MinimaxBot(Bot):
                 a, b = counts[0], counts[1]
                 self._eval_score += st[a + 1][b] - st[a][b]
                 counts[0] = a + 1
+                if a + 1 >= 4:
+                    hot_a.add(wkey)
                 if a + 1 == _WIN_LENGTH and b == 0:
                     won = True
         else:
+            hot_b = self._hot_b
             for d_idx, oq, or_ in _WINDOW_OFFSETS:
                 wkey = (d_idx, q - oq, r - or_)
                 counts = wc.get(wkey)
@@ -307,6 +321,8 @@ class MinimaxBot(Bot):
                 a, b = counts[0], counts[1]
                 self._eval_score += st[a][b + 1] - st[a][b]
                 counts[1] = b + 1
+                if b + 1 >= 4:
+                    hot_b.add(wkey)
                 if b + 1 == _WIN_LENGTH and a == 0:
                     won = True
 
@@ -350,19 +366,25 @@ class MinimaxBot(Bot):
         st = self._score_table
         wc = self._wc
         if player == Player.A:
+            hot_a = self._hot_a
             for d_idx, oq, or_ in _WINDOW_OFFSETS:
                 wkey = (d_idx, q - oq, r - or_)
                 counts = wc[wkey]
                 a, b = counts[0], counts[1]
                 self._eval_score += st[a - 1][b] - st[a][b]
                 counts[0] = a - 1
+                if a - 1 < 4:
+                    hot_a.discard(wkey)
         else:
+            hot_b = self._hot_b
             for d_idx, oq, or_ in _WINDOW_OFFSETS:
                 wkey = (d_idx, q - oq, r - or_)
                 counts = wc[wkey]
                 a, b = counts[0], counts[1]
                 self._eval_score += st[a][b - 1] - st[a][b]
                 counts[1] = b - 1
+                if b - 1 < 4:
+                    hot_b.discard(wkey)
 
         # Undo candidates: (q, r) is empty again
         rc = self._cand_refcount
@@ -415,8 +437,11 @@ class MinimaxBot(Bot):
         """
         p_idx = 0 if player == Player.A else 1
         o_idx = 1 - p_idx
+        hot = self._hot_a if player == Player.A else self._hot_b
+        wc = self._wc
         board = game.board
-        for wkey, counts in self._wc.items():
+        for wkey in hot:
+            counts = wc[wkey]
             if counts[p_idx] >= _WIN_LENGTH - 2 and counts[o_idx] == 0:
                 empties = counts[p_idx] == _WIN_LENGTH - 2  # expect 2 empties
                 d_idx, sq, sr = wkey
@@ -440,9 +465,12 @@ class MinimaxBot(Bot):
         threat_cells = set()
         p_idx = 0 if player == Player.A else 1
         o_idx = 1 - p_idx
+        hot = self._hot_a if player == Player.A else self._hot_b
+        wc = self._wc
         board = game.board
-        for wkey, counts in self._wc.items():
-            if counts[p_idx] >= 4 and counts[o_idx] == 0:
+        for wkey in hot:
+            counts = wc[wkey]
+            if counts[o_idx] == 0:
                 d_idx, sq, sr = wkey
                 dq, dr = _DIR_VECTORS[d_idx]
                 for j in range(_WIN_LENGTH):
@@ -601,7 +629,10 @@ class MinimaxBot(Bot):
             # Collect sets of empties per threat window — must hit at least one per window
             must_hit = []
             board = game.board
-            for wkey, counts in self._wc.items():
+            hot = self._hot_a if opponent == Player.A else self._hot_b
+            wc = self._wc
+            for wkey in hot:
+                counts = wc[wkey]
                 if counts[p_idx] >= _WIN_LENGTH - 2 and counts[o_idx] == 0:
                     d_idx, sq, sr = wkey
                     dq, dr = _DIR_VECTORS[d_idx]
