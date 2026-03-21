@@ -21,7 +21,7 @@ _DEF_MULT = [0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]      # defensive multiplier per op
 _CANDIDATE_CAP = 15          # max single-cell candidates in minimax
 _ROOT_CANDIDATE_CAP = 15     # max single-cell candidates at root
 _NEIGHBOR_DIST = 1           # hex distance for candidate generation
-_DELTA_WEIGHT = 0.01         # weight of eval delta vs history in move ordering
+_DELTA_WEIGHT = 0.1          # weight of eval delta vs history in move ordering
 
 
 class TimeUp(Exception):
