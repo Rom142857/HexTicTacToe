@@ -5,6 +5,8 @@ Usage:
 """
 
 import os
+import pickle
+import random
 import sys
 import time
 from collections import defaultdict
@@ -32,7 +34,47 @@ class TimeLimitExceeded(Exception):
         super().__init__(f"{bot} exceeded time limit {violations} times")
 
 
-def play_game(bot_a, bot_b, win_length=6, violations=None, max_moves=None):
+def _load_positions(path, num_games, seed=42):
+    """Load positions from a pickle file, one per unique game, deterministically.
+
+    Selects positions that are spread across different games using a fixed seed.
+    Returns a list of (board_dict, current_player) tuples.
+    """
+    with open(path, "rb") as f:
+        data = pickle.load(f)
+
+    # Group by game uid
+    by_uid = defaultdict(list)
+    for board, player, _score, _label, uid in data:
+        by_uid[uid].append((board, player))
+
+    # Pick one position per game (middle of the game for interesting positions)
+    rng = random.Random(seed)
+    uids = sorted(by_uid.keys())  # sort for determinism
+    rng.shuffle(uids)
+    positions = []
+    for uid in uids[:num_games]:
+        entries = by_uid[uid]
+        # Pick from the middle third for non-trivial positions
+        lo = len(entries) // 3
+        hi = max(lo + 1, 2 * len(entries) // 3)
+        idx = rng.randint(lo, hi - 1)
+        positions.append(entries[idx])
+    return positions
+
+
+def _setup_game_from_position(board_dict, current_player, win_length=6):
+    """Create a HexGame initialized to the given board position."""
+    game = HexGame(win_length=win_length)
+    game.board = dict(board_dict)
+    game.current_player = current_player
+    game.move_count = len(board_dict)
+    game.moves_left_in_turn = 2
+    return game
+
+
+def play_game(bot_a, bot_b, win_length=6, violations=None, max_moves=None,
+              start_position=None):
     """Play one game. Returns (winner, depth_counts_a, depth_counts_b, time_a, time_b).
 
     depth_counts maps depth -> number of moves at that depth.
@@ -41,7 +83,11 @@ def play_game(bot_a, bot_b, win_length=6, violations=None, max_moves=None):
     """
     if max_moves is None:
         max_moves = MAX_MOVES_PER_GAME
-    game = HexGame(win_length=win_length)
+    if start_position is not None:
+        board_dict, current_player = start_position
+        game = _setup_game_from_position(board_dict, current_player, win_length)
+    else:
+        game = HexGame(win_length=win_length)
     bots = {Player.A: bot_a, Player.B: bot_b}
     depths = {Player.A: defaultdict(int), Player.B: defaultdict(int)}
     times = {Player.A: [0.0, 0], Player.B: [0.0, 0]}  # [total_secs, num_moves]
@@ -97,7 +143,7 @@ def play_game(bot_a, bot_b, win_length=6, violations=None, max_moves=None):
 
 def _play_one(args):
     """Worker function for multiprocessing. Plays a single game."""
-    bot_a, bot_b, game_idx, win_length, max_moves = args
+    bot_a, bot_b, game_idx, win_length, max_moves, start_position = args
     swapped = game_idx % 2 == 1
 
     if swapped:
@@ -108,7 +154,9 @@ def _play_one(args):
     violations = {}
     exceeded = False
     try:
-        winner, d_a, d_b, t_a, t_b = play_game(seat_a, seat_b, win_length, violations, max_moves)
+        winner, d_a, d_b, t_a, t_b = play_game(
+            seat_a, seat_b, win_length, violations, max_moves,
+            start_position=start_position)
     except TimeLimitExceeded:
         exceeded = True
         winner = Player.NONE
@@ -131,8 +179,14 @@ def _play_one(args):
     )
 
 
-def evaluate(bot_a, bot_b, num_games=100, win_length=6, time_limit=0.1, use_tqdm=True, max_moves=None):
-    """Play num_games between two bots in parallel, swapping sides each game."""
+def evaluate(bot_a, bot_b, num_games=100, win_length=6, time_limit=0.1,
+             use_tqdm=True, max_moves=None, positions=None):
+    """Play num_games between two bots in parallel, swapping sides each game.
+
+    If positions is provided (list of (board_dict, current_player) tuples),
+    each position is played twice (each bot plays as the to-move side),
+    and num_games is ignored.
+    """
     if max_moves is None:
         max_moves = MAX_MOVES_PER_GAME
     bot_a.time_limit = time_limit
@@ -151,7 +205,15 @@ def evaluate(bot_a, bot_b, num_games=100, win_length=6, time_limit=0.1, use_tqdm
     game_lengths = []  # total moves per game
 
     workers = os.cpu_count() or 1
-    args = [(bot_a, bot_b, i, win_length, max_moves) for i in range(num_games)]
+    if positions is not None:
+        # Two games per position: game_idx even = normal, odd = swapped
+        num_games = len(positions) * 2
+        args = []
+        for i, pos in enumerate(positions):
+            args.append((bot_a, bot_b, i * 2,     win_length, max_moves, pos))
+            args.append((bot_a, bot_b, i * 2 + 1, win_length, max_moves, pos))
+    else:
+        args = [(bot_a, bot_b, i, win_length, max_moves, None) for i in range(num_games)]
 
     t0 = time.time()
 
@@ -300,6 +362,8 @@ if __name__ == "__main__":
                         help="Pattern values JSON for bot A (forces ai_tuned)")
     parser.add_argument("--pattern-b", type=str, default=None,
                         help="Pattern values JSON for bot B (forces ai_tuned)")
+    parser.add_argument("--positions", type=str, default=None,
+                        help="Pickle file of seed positions (each played twice, both sides)")
     parsed = parser.parse_args()
 
     if parsed.pattern_a:
@@ -313,4 +377,9 @@ if __name__ == "__main__":
     else:
         b = load_bot(parsed.bot_b, time_limit=0.1)
 
-    evaluate(a, b, num_games=parsed.num_games, use_tqdm=not parsed.no_tqdm)
+    positions = None
+    if parsed.positions:
+        positions = _load_positions(parsed.positions, parsed.num_games)
+
+    evaluate(a, b, num_games=parsed.num_games, use_tqdm=not parsed.no_tqdm,
+             positions=positions)
