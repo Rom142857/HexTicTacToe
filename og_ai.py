@@ -21,7 +21,7 @@ _CANDIDATE_CAP = 11          # max single-cell candidates in minimax
 _ROOT_CANDIDATE_CAP = 13     # max single-cell candidates at root
 _NEIGHBOR_DIST = 2           # hex distance for candidate generation
 _DELTA_WEIGHT = 1.5          # weight of eval delta vs history in move ordering
-_MAX_QDEPTH = 16             # max depth for quiescence threat search
+_MAX_QDEPTH = 8              # max depth for quiescence threat search
 
 
 class TimeUp(Exception):
@@ -485,23 +485,18 @@ class MinimaxBot(Bot):
         return threat_cells
 
     def _filter_turns_by_threats(self, game, turns):
-        """Filter turns to forced moves when threats of four exist."""
+        """Filter turns to forced moves when threats of four exist.
+
+        Own threats are not checked here — _find_instant_win already
+        catches and short-circuits those before we reach this point.
+        """
         current = game.current_player
         opponent = Player.B if current == Player.A else Player.A
 
-        my_threats = self._find_threat_cells(game, current)
-        if my_threats:
-            winning = [t for t in turns
-                       if t[0] in my_threats or t[1] in my_threats]
-            if winning:
-                return winning
-
         opp_threats = self._find_threat_cells(game, opponent)
         if opp_threats:
-            blocking = [t for t in turns
-                        if t[0] in opp_threats or t[1] in opp_threats]
-            if blocking:
-                return blocking
+            return [t for t in turns
+                    if t[0] in opp_threats or t[1] in opp_threats]
 
         return turns
 

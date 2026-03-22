@@ -19,10 +19,11 @@ from bot import Bot
 from game import Player, HEX_DIRECTIONS
 
 # ── Hyperparameters ──────────────────────────────────────────────────
-_CANDIDATE_CAP = 15
-_ROOT_CANDIDATE_CAP = 15
-_NEIGHBOR_DIST = 1
-_DELTA_WEIGHT = 1.5
+_CANDIDATE_CAP = 11          # max single-cell candidates in minimax
+_ROOT_CANDIDATE_CAP = 13     # max single-cell candidates at root
+_NEIGHBOR_DIST = 2           # hex distance for candidate generation
+_DELTA_WEIGHT = 1.5          # weight of eval delta vs history in move ordering
+_MAX_QDEPTH = 16             # max depth for quiescence threat search
 
 _WIN_LENGTH = 6
 
@@ -148,6 +149,7 @@ class MinimaxBot(Bot):
         self._rc_stack = []
         self._history = {}
         self.last_ebf = 0
+        self.last_score = 0
 
         if pattern_path is None:
             pattern_path = _DEFAULT_PATTERN_PATH
@@ -160,11 +162,15 @@ class MinimaxBot(Bot):
             return [(0, 0)]
 
         self._deadline = time.time() + self.time_limit * 2
+        if game.current_player != getattr(self, '_player', None):
+            self._tt.clear()
+            self._history.clear()
         self._player = game.current_player
         self._nodes = 0
         self.last_depth = 0
         self.last_score = 0
         self.last_ebf = 0
+        self.last_score = 0
         if len(self._tt) > 1_000_000:
             self._tt.clear()
 
@@ -292,6 +298,7 @@ class MinimaxBot(Bot):
                 nodes_this_depth = self._nodes - nodes_before
                 if nodes_this_depth > 1:
                     self.last_ebf = round(nodes_this_depth ** (1.0 / depth), 1)
+                self.last_score = scores.get(result, 0)
                 turns.sort(key=lambda t: scores.get(t, 0), reverse=maximizing)
                 if abs(scores.get(result, 0)) >= _WIN_SCORE:
                     break
@@ -516,24 +523,40 @@ class MinimaxBot(Bot):
         return threat_cells
 
     def _filter_turns_by_threats(self, game, turns):
+        """Filter turns to only those that block ALL opponent threat windows.
+
+        Own threats are not checked here — _find_instant_win already
+        catches and short-circuits those before we reach this point.
+        """
         current = game.current_player
         opponent = Player.B if current == Player.A else Player.A
 
-        my_threats = self._find_threat_cells(game, current)
-        if my_threats:
-            winning = [t for t in turns
-                       if t[0] in my_threats or t[1] in my_threats]
-            if winning:
-                return winning
+        p_idx = 0 if opponent == Player.A else 1
+        o_idx = 1 - p_idx
+        hot = self._hot_a if opponent == Player.A else self._hot_b
+        wc = self._wc
+        board = game.board
 
-        opp_threats = self._find_threat_cells(game, opponent)
-        if opp_threats:
-            blocking = [t for t in turns
-                        if t[0] in opp_threats or t[1] in opp_threats]
-            if blocking:
-                return blocking
+        # Collect per-window empty sets — each window must be hit
+        must_hit = []
+        for wkey in hot:
+            counts = wc[wkey]
+            if counts[p_idx] >= _WIN_LENGTH - 2 and counts[o_idx] == 0:
+                d_idx, sq, sr = wkey
+                dq, dr = _DIR_VECTORS[d_idx]
+                empties = frozenset(
+                    (sq + j * dq, sr + j * dr)
+                    for j in range(_WIN_LENGTH)
+                    if (sq + j * dq, sr + j * dr) not in board
+                )
+                must_hit.append(empties)
 
-        return turns
+        if not must_hit:
+            return turns
+
+        # Only keep turns where the two stones cover every threat window
+        return [t for t in turns
+                if all(t[0] in w or t[1] in w for w in must_hit)]
 
     # ── Turn management (identical to ai.py) ──
 
@@ -574,7 +597,131 @@ class MinimaxBot(Bot):
         turns = list(combinations(candidates, 2))
         return self._filter_turns_by_threats(game, turns)
 
-    # ── Search (identical to ai.py) ──
+    def _generate_threat_turns(self, game, my_threats, opp_threats):
+        """Generate threat turns: block opponent threats first, else make own.
+
+        When blocking: pairs of blocking cells (need 2 stones) + each blocking
+        cell with greedy best companion (need 1 stone).
+        When attacking: pairs of own threat cells + each with greedy companion.
+        Greedy companion chosen by _move_delta for the single-threat-cell case.
+        """
+        win_turn = self._find_instant_win(game, game.current_player)
+        if win_turn:
+            return [win_turn]
+
+        is_a = game.current_player == Player.A
+        maximizing = game.current_player == self._player
+        sign = 1 if maximizing else -1
+
+        opp_cells = [c for c in opp_threats if c in self._cand_set]
+        my_cells = [c for c in my_threats if c in self._cand_set]
+
+        if opp_cells:
+            primary = opp_cells
+        elif my_cells:
+            primary = my_cells
+        else:
+            return []
+
+        if len(primary) >= 2:
+            # All pairs of threat/block cells — sorted by move_delta sum
+            pairs = list(combinations(primary, 2))
+            pairs.sort(
+                key=lambda p: self._move_delta(p[0][0], p[0][1], is_a)
+                            + self._move_delta(p[1][0], p[1][1], is_a),
+                reverse=maximizing,
+            )
+            return pairs
+
+        # Single threat cell — pair with greedy best companion by move_delta
+        tc = primary[0]
+        cand_list = list(self._cand_set)
+        best_comp = None
+        best_delta = -math.inf
+        for c in cand_list:
+            if c != tc:
+                d = self._move_delta(c[0], c[1], is_a) * sign
+                if d > best_delta:
+                    best_delta = d
+                    best_comp = c
+        if best_comp is None:
+            return []
+        return [(min(tc, best_comp), max(tc, best_comp))]
+
+    def _quiescence(self, game, alpha, beta, qdepth):
+        """Extend search while threats exist, considering only threat moves."""
+        self._check_time()
+
+        if game.game_over:
+            if game.winner == self._player:
+                return _WIN_SCORE
+            elif game.winner != Player.NONE:
+                return -_WIN_SCORE
+            return 0
+
+        win_turn = self._find_instant_win(game, game.current_player)
+        if win_turn:
+            undo_info = self._make_turn(game, win_turn)
+            score = _WIN_SCORE if game.winner == self._player else -_WIN_SCORE
+            self._undo_turn(game, undo_info)
+            return score
+
+        stand_pat = self._eval_score
+        current = game.current_player
+        opponent = Player.B if current == Player.A else Player.A
+        my_threats = self._find_threat_cells(game, current)
+        opp_threats = self._find_threat_cells(game, opponent)
+
+        if (not my_threats and not opp_threats) or qdepth <= 0:
+            return stand_pat
+
+        maximizing = current == self._player
+
+        if maximizing:
+            if stand_pat >= beta:
+                return stand_pat
+            alpha = max(alpha, stand_pat)
+        else:
+            if stand_pat <= alpha:
+                return stand_pat
+            beta = min(beta, stand_pat)
+
+        threat_turns = self._generate_threat_turns(game, my_threats, opp_threats)
+        if not threat_turns:
+            return stand_pat
+
+        if maximizing:
+            value = stand_pat
+            for turn in threat_turns:
+                undo_info = self._make_turn(game, turn)
+                if game.game_over:
+                    child_val = _WIN_SCORE if game.winner == self._player else -_WIN_SCORE
+                else:
+                    child_val = self._quiescence(game, alpha, beta, qdepth - 1)
+                self._undo_turn(game, undo_info)
+                if child_val > value:
+                    value = child_val
+                alpha = max(alpha, value)
+                if alpha >= beta:
+                    break
+        else:
+            value = stand_pat
+            for turn in threat_turns:
+                undo_info = self._make_turn(game, turn)
+                if game.game_over:
+                    child_val = _WIN_SCORE if game.winner == self._player else -_WIN_SCORE
+                else:
+                    child_val = self._quiescence(game, alpha, beta, qdepth - 1)
+                self._undo_turn(game, undo_info)
+                if child_val < value:
+                    value = child_val
+                beta = min(beta, value)
+                if alpha >= beta:
+                    break
+
+        return value
+
+    # ── Search ──
 
     def _search_root(self, game, turns, depth):
         maximizing = game.current_player == self._player
@@ -630,7 +777,7 @@ class MinimaxBot(Bot):
                     return tt_score
 
         if depth == 0:
-            score = self._eval_score
+            score = self._quiescence(game, alpha, beta, _MAX_QDEPTH)
             self._tt[tt_key] = (0, score, _EXACT, None)
             return score
 

@@ -485,25 +485,40 @@ class MinimaxBot(Bot):
         return threat_cells
 
     def _filter_turns_by_threats(self, game, turns):
-        """Filter turns to forced moves when threats of four exist."""
+        """Filter turns to only those that block ALL opponent threat windows.
+
+        Own threats are not checked here — _find_instant_win already
+        catches and short-circuits those before we reach this point.
+        """
         current = game.current_player
         opponent = Player.B if current == Player.A else Player.A
 
-        my_threats = self._find_threat_cells(game, current)
-        if my_threats:
-            winning = [t for t in turns
-                       if t[0] in my_threats or t[1] in my_threats]
-            if winning:
-                return winning
+        p_idx = 0 if opponent == Player.A else 1
+        o_idx = 1 - p_idx
+        hot = self._hot_a if opponent == Player.A else self._hot_b
+        wc = self._wc
+        board = game.board
 
-        opp_threats = self._find_threat_cells(game, opponent)
-        if opp_threats:
-            blocking = [t for t in turns
-                        if t[0] in opp_threats or t[1] in opp_threats]
-            if blocking:
-                return blocking
+        # Collect per-window empty sets — each window must be hit
+        must_hit = []
+        for wkey in hot:
+            counts = wc[wkey]
+            if counts[p_idx] >= _WIN_LENGTH - 2 and counts[o_idx] == 0:
+                d_idx, sq, sr = wkey
+                dq, dr = _DIR_VECTORS[d_idx]
+                empties = frozenset(
+                    (sq + j * dq, sr + j * dr)
+                    for j in range(_WIN_LENGTH)
+                    if (sq + j * dq, sr + j * dr) not in board
+                )
+                must_hit.append(empties)
 
-        return turns
+        if not must_hit:
+            return turns
+
+        # Only keep turns where the two stones cover every threat window
+        return [t for t in turns
+                if all(t[0] in w or t[1] in w for w in must_hit)]
 
     def _make_turn(self, game, turn):
         """Apply a full turn (2 stones). Returns undo info list."""
