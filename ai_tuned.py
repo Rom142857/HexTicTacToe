@@ -1,4 +1,4 @@
-"""Minimax bot using learned 8-cell pattern evaluation.
+"""Minimax bot using learned pattern evaluation.
 
 Same search as ai.py (iterative deepening, alpha-beta, TT, incremental eval),
 but replaces the hand-tuned LINE_SCORES with learned pattern values from
@@ -6,7 +6,7 @@ a pattern_values.json file.
 
 Uses two window systems:
   - 6-cell windows: win detection, threat analysis (hot windows, instant win)
-  - 8-cell windows: evaluation scoring via learned pattern lookup
+  - N-cell windows: evaluation scoring via learned pattern lookup (N from model meta)
 """
 
 import json
@@ -17,7 +17,6 @@ import time
 from itertools import combinations
 from bot import Bot
 from game import Player, HEX_DIRECTIONS
-from learned_eval.pattern_table import CANON_INDEX, CANON_SIGN, NUM_PATTERNS
 
 # ── Hyperparameters ──────────────────────────────────────────────────
 _CANDIDATE_CAP = 15
@@ -26,7 +25,6 @@ _NEIGHBOR_DIST = 1
 _DELTA_WEIGHT = 1.5
 
 _WIN_LENGTH = 6
-_EVAL_LENGTH = 6
 
 
 class TimeUp(Exception):
@@ -52,15 +50,13 @@ _WIN_OFFSETS = tuple(
     for k in range(_WIN_LENGTH)
 )
 
-# 8-cell window offsets with position k (for eval)
-_EVAL_OFFSETS = tuple(
-    (d_idx, k, k * dq, k * dr)
-    for d_idx, (dq, dr) in enumerate(HEX_DIRECTIONS)
-    for k in range(_EVAL_LENGTH)
-)
 
-# Powers of 3 for pattern_int encoding
-_POW3 = tuple(3 ** k for k in range(_EVAL_LENGTH))
+def _build_eval_offsets(eval_length):
+    return tuple(
+        (d_idx, k, k * dq, k * dr)
+        for d_idx, (dq, dr) in enumerate(HEX_DIRECTIONS)
+        for k in range(eval_length)
+    )
 
 # Neighbor offsets
 _NEIGHBOR_OFFSETS_2 = tuple(
@@ -87,13 +83,18 @@ def _load_pattern_values(path):
 
     Values in JSON are normalized; multiplied by _meta.score_scale to recover
     eval-scale units (comparable to LINE_SCORES).
-    Returns PAT_VALUE[pattern_int] = eval value, where pattern is encoded
-    with current_player=1, opponent=2.
+    Returns (pat_value, eval_length) where pat_value[pattern_int] = eval value.
     """
     with open(path) as f:
         raw = json.load(f)
 
-    score_scale = raw.get("_meta", {}).get("score_scale", 1)
+    meta = raw.get("_meta", {})
+    score_scale = meta.get("score_scale", 1)
+    eval_length = meta.get("window_length", 6)
+
+    # Build pattern tables for this window length
+    from learned_eval.pattern_table import build_arrays
+    canon_patterns, canon_index, canon_sign, num_canon, num_patterns = build_arrays(eval_length)
 
     # Parse the canonical pattern values
     canon_by_str = {}
@@ -101,23 +102,21 @@ def _load_pattern_values(path):
         if pat_str != "_meta":
             canon_by_str[pat_str] = val * score_scale
 
-    # Build flat lookup from pattern_table's precomputed mappings
-    from learned_eval.pattern_table import CANON_PATTERNS
-    params = [0.0] * len(CANON_PATTERNS)
-    for i, pat in enumerate(CANON_PATTERNS):
+    params = [0.0] * num_canon
+    for i, pat in enumerate(canon_patterns):
         pat_str = "".join(str(c) for c in pat)
         if pat_str in canon_by_str:
             params[i] = canon_by_str[pat_str]
 
     # Build PAT_VALUE: pattern_int -> value (me=1, opp=2 perspective)
-    pat_value = [0.0] * NUM_PATTERNS
-    for pi in range(NUM_PATTERNS):
-        ci = CANON_INDEX[pi]
-        cs = CANON_SIGN[pi]
+    pat_value = [0.0] * num_patterns
+    for pi in range(num_patterns):
+        ci = canon_index[pi]
+        cs = canon_sign[pi]
         if cs != 0 and ci >= 0:
             pat_value[pi] = cs * params[ci]
 
-    return pat_value
+    return pat_value, eval_length
 
 
 def get_candidates(game):
@@ -152,7 +151,9 @@ class MinimaxBot(Bot):
 
         if pattern_path is None:
             pattern_path = _DEFAULT_PATTERN_PATH
-        self._pv = _load_pattern_values(pattern_path)
+        self._pv, self._eval_length = _load_pattern_values(pattern_path)
+        self._eval_offsets = _build_eval_offsets(self._eval_length)
+        self._pow3 = tuple(3 ** k for k in range(self._eval_length))
 
     def get_move(self, game):
         if not game.board:
@@ -217,15 +218,16 @@ class MinimaxBot(Bot):
             if counts[1] >= 4:
                 self._hot_b.add(wkey)
 
-        # ── 8-cell windows: pattern_ints for eval ──
+        # ── N-cell windows: pattern_ints for eval ──
         self._wp = {}  # wkey -> pattern_int (me=1, opp=2 encoding)
         pv = self._pv
         cell_a = self._cell_a
         cell_b = self._cell_b
+        pow3 = self._pow3
         seen8 = set()
         self._eval_score = 0.0
         for (q, r) in board:
-            for d_idx, k, oq, or_ in _EVAL_OFFSETS:
+            for d_idx, k, oq, or_ in self._eval_offsets:
                 wkey8 = (3 + d_idx, q - oq, r - or_)  # offset key space from 6-cell
                 if wkey8 in seen8:
                     continue
@@ -234,13 +236,13 @@ class MinimaxBot(Bot):
                 sq, sr = q - oq, r - or_
                 pat_int = 0
                 has_piece = False
-                for j in range(_EVAL_LENGTH):
+                for j in range(self._eval_length):
                     cp = board.get((sq + j * dq, sr + j * dr))
                     if cp == Player.A:
-                        pat_int += cell_a * _POW3[j]
+                        pat_int += cell_a * pow3[j]
                         has_piece = True
                     elif cp == Player.B:
-                        pat_int += cell_b * _POW3[j]
+                        pat_int += cell_b * pow3[j]
                         has_piece = True
                 if has_piece:
                     self._wp[wkey8] = pat_int
@@ -361,10 +363,11 @@ class MinimaxBot(Bot):
         # ── 8-cell windows: update pattern_ints for eval ──
         pv = self._pv
         wp = self._wp
-        for d_idx, k, oq, or_ in _EVAL_OFFSETS:
+        pow3 = self._pow3
+        for d_idx, k, oq, or_ in self._eval_offsets:
             wkey8 = (3 + d_idx, q - oq, r - or_)
             old_pi = wp.get(wkey8, 0)
-            new_pi = old_pi + cell_val * _POW3[k]
+            new_pi = old_pi + cell_val * pow3[k]
             self._eval_score += pv[new_pi] - pv[old_pi]
             wp[wkey8] = new_pi
 
@@ -424,10 +427,11 @@ class MinimaxBot(Bot):
         # ── 8-cell windows ──
         pv = self._pv
         wp = self._wp
-        for d_idx, k, oq, or_ in _EVAL_OFFSETS:
+        pow3 = self._pow3
+        for d_idx, k, oq, or_ in self._eval_offsets:
             wkey8 = (3 + d_idx, q - oq, r - or_)
             old_pi = wp[wkey8]
-            new_pi = old_pi - cell_val * _POW3[k]
+            new_pi = old_pi - cell_val * pow3[k]
             self._eval_score += pv[new_pi] - pv[old_pi]
             if new_pi == 0:
                 del wp[wkey8]
@@ -453,15 +457,16 @@ class MinimaxBot(Bot):
         return (self._hash, game.current_player, game.moves_left_in_turn)
 
     def _move_delta(self, q, r, is_a):
-        """Eval delta from placing at (q,r) using 8-cell patterns — read-only."""
+        """Eval delta from placing at (q,r) using N-cell patterns — read-only."""
         cell_val = self._cell_a if is_a else self._cell_b
         pv = self._pv
         wp = self._wp
+        pow3 = self._pow3
         delta = 0.0
-        for d_idx, k, oq, or_ in _EVAL_OFFSETS:
+        for d_idx, k, oq, or_ in self._eval_offsets:
             wkey8 = (3 + d_idx, q - oq, r - or_)
             old_pi = wp.get(wkey8, 0)
-            new_pi = old_pi + cell_val * _POW3[k]
+            new_pi = old_pi + cell_val * pow3[k]
             delta += pv[new_pi] - pv[old_pi]
         return delta
 

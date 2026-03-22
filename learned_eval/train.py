@@ -23,13 +23,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from game import Player, HEX_DIRECTIONS
 from ai import LINE_SCORES
-from learned_eval.pattern_table import (
-    WINDOW_LENGTH, CANON_INDEX, CANON_SIGN, NUM_CANON,
-    CANON_PATTERNS, pattern_to_int,
-)
+from learned_eval.pattern_table import build_arrays
 
 DIR_VECTORS = list(HEX_DIRECTIONS)
 _WIN_LENGTH = 6
+
+# These globals are set by main() based on --window-length
+WINDOW_LENGTH = 6
+CANON_PATTERNS = None
+CANON_INDEX = None
+CANON_SIGN = None
+NUM_CANON = 0
 
 
 def _board_has_win(board):
@@ -108,11 +112,11 @@ def extract_features(board, current_player):
     return features
 
 
-def build_dataset(positions, target_idx=2, win_idx=None):
-    """Convert positions to sparse feature matrix and tanh-compressed target vector.
+def build_dataset(positions, target_idx=2, win_idx=None, binary_targets=False):
+    """Convert positions to sparse feature matrix and target vector.
 
-    Scores are already normalized by SCORE_SCALE in generate_positions.
-    tanh compresses them to (-1, +1): forced wins (±5000) → ±1, normal (±1) → linear.
+    For eval targets: tanh compresses continuous scores to (-1, +1).
+    For binary win/loss targets (binary_targets=True): targets used as-is (±1).
     """
     print(f"Extracting features from {len(positions)} positions (target=entry[{target_idx}])...")
     t0 = time.time()
@@ -142,7 +146,10 @@ def build_dataset(positions, target_idx=2, win_idx=None):
     raw_targets = np.array(raw_targets, dtype=np.float64)
     win_scores = np.array(win_scores, dtype=np.float64) if win_scores else None
 
-    targets = np.tanh(raw_targets)
+    if binary_targets:
+        targets = raw_targets  # already ±1, no transformation
+    else:
+        targets = np.tanh(raw_targets)
     weights = np.ones(len(targets), dtype=np.float64)
 
     normal = raw_targets[np.abs(raw_targets) < 4999]
@@ -196,9 +203,9 @@ def _init_from_line_scores(num_params):
     for i, pat in enumerate(CANON_PATTERNS):
         my_count = sum(1 for c in pat if c == 1)
         opp_count = sum(1 for c in pat if c == 2)
-        if my_count > 0 and opp_count == 0:
+        if my_count > 0 and opp_count == 0 and my_count < _WIN_LENGTH:
             params[i] = LINE_SCORES[my_count] / SCORE_SCALE
-        elif opp_count > 0 and my_count == 0:
+        elif opp_count > 0 and my_count == 0 and opp_count < _WIN_LENGTH:
             params[i] = -LINE_SCORES[opp_count] / SCORE_SCALE
     return params
 
@@ -292,7 +299,7 @@ def save_results(params, output_dir):
     denorm_params = params
 
     # Save as JSON: {pattern_string: value}
-    result = {"_meta": {"score_scale": SCORE_SCALE}}
+    result = {"_meta": {"score_scale": SCORE_SCALE, "window_length": WINDOW_LENGTH}}
     for i, pat in enumerate(CANON_PATTERNS):
         pat_str = "".join(str(c) for c in pat)
         result[pat_str] = float(denorm_params[i])
@@ -381,7 +388,15 @@ def main():
                         help="Filter out draw positions (win_score == 0) before training")
     parser.add_argument("--subsample", type=int, default=0,
                         help="Keep every Nth position per game (by board size) to reduce correlation")
+    parser.add_argument("--window-length", type=int, default=6, choices=[6, 7, 8],
+                        help="Pattern window length (default 6)")
     args = parser.parse_args()
+
+    # Initialize pattern tables for the requested window length
+    global WINDOW_LENGTH, CANON_PATTERNS, CANON_INDEX, CANON_SIGN, NUM_CANON
+    WINDOW_LENGTH = args.window_length
+    CANON_PATTERNS, CANON_INDEX, CANON_SIGN, NUM_CANON, _ = build_arrays(WINDOW_LENGTH)
+    print(f"Window length {WINDOW_LENGTH}: {NUM_CANON} canonical patterns")
 
     with open(args.input, "rb") as f:
         positions = pickle.load(f)
@@ -391,6 +406,14 @@ def main():
     is_5tuple = len(positions[0]) == 5
     if args.target == "win":
         target_idx = 3 if is_5tuple else 2  # 4-tuple eval IS the game outcome
+        if not is_5tuple:
+            # 4-tuple win labels may be ±1000 instead of ±1; normalize them
+            max_abs = max(abs(p[target_idx]) for p in positions)
+            if max_abs > 1.5:
+                print(f"Normalizing 4-tuple win labels from ±{max_abs:.0f} to ±1")
+                positions = [
+                    (p[0], p[1], p[2] / max_abs, p[3]) for p in positions
+                ]
         print(f"Training on game outcomes (entry[{target_idx}])")
     else:
         target_idx = 2
@@ -423,12 +446,14 @@ def main():
         print(f"Subsampled every {args.subsample}: {before} -> {len(positions)} positions")
 
     # win_score index for accuracy reporting
-    win_idx = 3 if is_5tuple else None
+    win_idx = 3 if is_5tuple else (2 if args.target == "win" else None)
 
     train_pos, val_pos = split_by_game(positions, val_fraction=args.val_fraction)
 
-    train_data = build_dataset(train_pos, target_idx=target_idx, win_idx=win_idx)
-    val_data = build_dataset(val_pos, target_idx=target_idx, win_idx=win_idx)
+    # Binary targets when training on win labels (±1 used directly, no tanh)
+    binary = args.target == "win"
+    train_data = build_dataset(train_pos, target_idx=target_idx, win_idx=win_idx, binary_targets=binary)
+    val_data = build_dataset(val_pos, target_idx=target_idx, win_idx=win_idx, binary_targets=binary)
 
     params = train(train_data, val_data, NUM_CANON,
                    epochs=args.epochs, lr=args.lr, l2=args.l2)
