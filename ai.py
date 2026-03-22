@@ -23,6 +23,9 @@ _NEIGHBOR_DIST = 2           # hex distance for candidate generation
 _DELTA_WEIGHT = 1.5          # weight of eval delta vs history in move ordering
 _MAX_QDEPTH = 16             # max depth for quiescence threat search
 
+# 6 unit hex directions for colony candidate selection
+_COLONY_DIRS = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1)]
+
 
 class TimeUp(Exception):
     pass
@@ -559,6 +562,18 @@ class MinimaxBot(Bot):
         # Sort singles by delta — pairs from combinations inherit good ordering
         candidates.sort(key=lambda c: move_delta(c[0], c[1], is_a), reverse=maximizing)
         candidates = candidates[:_ROOT_CANDIDATE_CAP]
+
+        # Colony candidate: a random hex at max distance from the board cluster.
+        # Represents starting a separate group far from the main action.
+        occupied = list(game.board)
+        cq = sum(q for q, r in occupied) // len(occupied)
+        cr = sum(r for q, r in occupied) // len(occupied)
+        max_r = max(hex_distance(q - cq, r - cr) for q, r in occupied)
+        colony_dist = max_r + 3
+        dq, dr = random.choice(_COLONY_DIRS)
+        colony = (cq + dq * colony_dist, cr + dr * colony_dist)
+        if colony not in game.board:
+            candidates.append(colony)
 
         turns = list(combinations(candidates, 2))
         return self._filter_turns_by_threats(game, turns)

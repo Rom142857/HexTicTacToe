@@ -21,7 +21,10 @@ _CANDIDATE_CAP = 11          # max single-cell candidates in minimax
 _ROOT_CANDIDATE_CAP = 13     # max single-cell candidates at root
 _NEIGHBOR_DIST = 2           # hex distance for candidate generation
 _DELTA_WEIGHT = 1.5          # weight of eval delta vs history in move ordering
-_MAX_QDEPTH = 8              # max depth for quiescence threat search
+_MAX_QDEPTH = 16             # max depth for quiescence threat search
+
+# 6 unit hex directions for colony candidate selection
+_COLONY_DIRS = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1)]
 
 
 class TimeUp(Exception):
@@ -485,7 +488,7 @@ class MinimaxBot(Bot):
         return threat_cells
 
     def _filter_turns_by_threats(self, game, turns):
-        """Filter turns to forced moves when threats of four exist.
+        """Filter turns to only those that block ALL opponent threat windows.
 
         Own threats are not checked here — _find_instant_win already
         catches and short-circuits those before we reach this point.
@@ -493,12 +496,32 @@ class MinimaxBot(Bot):
         current = game.current_player
         opponent = Player.B if current == Player.A else Player.A
 
-        opp_threats = self._find_threat_cells(game, opponent)
-        if opp_threats:
-            return [t for t in turns
-                    if t[0] in opp_threats or t[1] in opp_threats]
+        p_idx = 0 if opponent == Player.A else 1
+        o_idx = 1 - p_idx
+        hot = self._hot_a if opponent == Player.A else self._hot_b
+        wc = self._wc
+        board = game.board
 
-        return turns
+        # Collect per-window empty sets — each window must be hit
+        must_hit = []
+        for wkey in hot:
+            counts = wc[wkey]
+            if counts[p_idx] >= _WIN_LENGTH - 2 and counts[o_idx] == 0:
+                d_idx, sq, sr = wkey
+                dq, dr = _DIR_VECTORS[d_idx]
+                empties = frozenset(
+                    (sq + j * dq, sr + j * dr)
+                    for j in range(_WIN_LENGTH)
+                    if (sq + j * dq, sr + j * dr) not in board
+                )
+                must_hit.append(empties)
+
+        if not must_hit:
+            return turns
+
+        # Only keep turns where the two stones cover every threat window
+        return [t for t in turns
+                if all(t[0] in w or t[1] in w for w in must_hit)]
 
     def _make_turn(self, game, turn):
         """Apply a full turn (2 stones). Returns undo info list."""
@@ -539,6 +562,18 @@ class MinimaxBot(Bot):
         # Sort singles by delta — pairs from combinations inherit good ordering
         candidates.sort(key=lambda c: move_delta(c[0], c[1], is_a), reverse=maximizing)
         candidates = candidates[:_ROOT_CANDIDATE_CAP]
+
+        # Colony candidate: a random hex at max distance from the board cluster.
+        # Represents starting a separate group far from the main action.
+        occupied = list(game.board)
+        cq = sum(q for q, r in occupied) // len(occupied)
+        cr = sum(r for q, r in occupied) // len(occupied)
+        max_r = max(hex_distance(q - cq, r - cr) for q, r in occupied)
+        colony_dist = max_r + 3
+        dq, dr = random.choice(_COLONY_DIRS)
+        colony = (cq + dq * colony_dist, cr + dr * colony_dist)
+        if colony not in game.board:
+            candidates.append(colony)
 
         turns = list(combinations(candidates, 2))
         return self._filter_turns_by_threats(game, turns)
