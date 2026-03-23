@@ -1,0 +1,122 @@
+[
+  {
+    "name": "playout_ss1",
+    "n_positions": 40502,
+    "n_train": 32363,
+    "n_val": 8139,
+    "val_mse": 0.8528445594308381,
+    "val_r2": 0.13795133313699492,
+    "val_acc": 0.6546258754146701,
+    "output_dir": "C:\\Users\\Lee\\coding\\python\\AI\\HexTicTacToe\\learned_eval\\sweep\\playout_ss1"
+  },
+  {
+    "name": "playout_ss2",
+    "n_positions": 20801,
+    "n_train": 16619,
+    "n_val": 4182,
+    "val_mse": 0.9110538292910787,
+    "val_r2": 0.08087045909675872,
+    "val_acc": 0.6315160210425633,
+    "output_dir": "C:\\Users\\Lee\\coding\\python\\AI\\HexTicTacToe\\learned_eval\\sweep\\playout_ss2"
+  },
+  {
+    "name": "playout_ss4",
+    "n_positions": 10935,
+    "n_train": 8734,
+    "n_val": 2201,
+    "val_mse": 0.9490406377301116,
+    "val_r2": 0.041293735359292705,
+    "val_acc": 0.615629259427533,
+    "output_dir": "C:\\Users\\Lee\\coding\\python\\AI\\HexTicTacToe\\learned_eval\\sweep\\playout_ss4"
+  },
+  {
+    "name": "playout_ss2_sym",
+    "n_positions": 41602,
+    "n_train": 33238,
+    "n_val": 8364,
+    "val_mse": 0.9510128274147664,
+    "val_r2": 0.04898717258523355,
+    "val_acc": 0.6137015781922525,
+    "output_dir": "C:\\Users\\Lee\\coding\\python\\AI\\HexTicTacToe\\learned_eval\\sweep\\playout_ss2_sym"
+  },
+  {
+    "name": "playout_ss8",
+    "n_positions": 6005,
+    "n_train": 4802,
+    "n_val": 1203,
+    "val_mse": 0.9721623035933251,
+    "val_r2": 0.01855430323888574,
+    "val_acc": 0.6126350789692435,
+    "output_dir": "C:\\Users\\Lee\\coding\\python\\AI\\HexTicTacToe\\learned_eval\\sweep\\playout_ss8"
+  },
+  {
+    "name": "playout_ss4_sym",
+    "n_positions": 21870,
+    "n_train": 17468,
+    "n_val": 4402,
+    "val_mse": 0.969395008856785,
+    "val_r2": 0.03060499114321502,
+    "val_acc": 0.6106315311222171,
+    "output_dir": "C:\\Users\\Lee\\coding\\python\\AI\\HexTicTacToe\\learned_eval\\sweep\\playout_ss4_sym"
+  },
+  {
+    "name": "human_ss1",
+    "n_positions": 45482,
+    "n_train": 36383,
+    "n_val": 9099,
+    "val_mse": 0.9386621542418584,
+    "val_r2": 0.061058301483863375,
+    "val_acc": 0.599406528189911,
+    "output_dir": "C:\\Users\\Lee\\coding\\python\\AI\\HexTicTacToe\\learned_eval\\sweep\\human_ss1"
+  },
+  {
+    "name": "human_ss2_sym",
+    "n_positions": 46560,
+    "n_train": 37252,
+    "n_val": 9308,
+    "val_mse": 0.9763915349496263,
+    "val_r2": 0.023608465050373728,
+    "val_acc": 0.5925010743446497,
+    "output_dir": "C:\\Users\\Lee\\coding\\python\\AI\\HexTicTacToe\\learned_eval\\sweep\\human_ss2_sym"
+  },
+  {
+    "name": "human_ss4_sym",
+    "n_positions": 24342,
+    "n_train": 19472,
+    "n_val": 4870,
+    "val_mse": 0.9810298398519749,
+    "val_r2": 0.018970160148025106,
+    "val_acc": 0.5804928131416838,
+    "output_dir": "C:\\Users\\Lee\\coding\\python\\AI\\HexTicTacToe\\learned_eval\\sweep\\human_ss4_sym"
+  },
+  {
+    "name": "human_ss2",
+    "n_positions": 23280,
+    "n_train": 18626,
+    "n_val": 4654,
+    "val_mse": 0.9952658153471093,
+    "val_r2": 0.0032098027776713556,
+    "val_acc": 0.5687580575848732,
+    "output_dir": "C:\\Users\\Lee\\coding\\python\\AI\\HexTicTacToe\\learned_eval\\sweep\\human_ss2"
+  },
+  {
+    "name": "human_ss4",
+    "n_positions": 12171,
+    "n_train": 9736,
+    "n_val": 2435,
+    "val_mse": 0.9951629551932398,
+    "val_r2": 0.0035650377182263604,
+    "val_acc": 0.5650924024640657,
+    "output_dir": "C:\\Users\\Lee\\coding\\python\\AI\\HexTicTacToe\\learned_eval\\sweep\\human_ss4"
+  },
+  {
+    "name": "human_ss8",
+    "n_positions": 6626,
+    "n_train": 5302,
+    "n_val": 1324,
+    "val_mse": 1.0153120434924134,
+    "val_r2": -0.016434601581435615,
+    "val_acc": 0.5468277945619335,
+    "output_dir": "C:\\Users\\Lee\\coding\\python\\AI\\HexTicTacToe\\learned_eval\\sweep\\human_ss8"
+  }
+]

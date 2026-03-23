@@ -14,7 +14,11 @@
       "Bash(grep -E \"\\\\.py$\")",
       "Bash(PYTHONIOENCODING=utf-8 python evaluate.py ai ai -n 20 --pattern-b learned_eval/results_epsilon_eval/pattern_values.json --no-tqdm 2>&1)",
       "Bash(PYTHONIOENCODING=utf-8 python evaluate.py ai -n 20 --pattern-b learned_eval/results_epsilon_win/pattern_values.json --no-tqdm 2>&1)",
-      "Bash(ls -la /Users/leedavis/coding/python/ai/HexTicTacToe/*.py)"
+      "Bash(ls -la /Users/leedavis/coding/python/ai/HexTicTacToe/*.py)",
+      "Bash(wc:*)",
+      "Bash(find /c/Users/Lee/coding/python/AI/HexTicTacToe/learned_eval/results* -name pattern_values.json)",
+      "Bash(grep:*)",
+      "Bash(taskkill //F //IM python.exe)"
     ]
   }
 }
