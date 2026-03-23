@@ -419,12 +419,39 @@ def main():
 
     # Deduplicate by board state (prefer longer sequences)
     seen_boards = set()
-    unique = []
+    deduped = []
     for r in sorted(results, key=lambda r: len(r["sequence"]), reverse=True):
         board_key = frozenset(sorted(r["board"].items()))
         if board_key not in seen_boards:
             seen_boards.add(board_key)
-            unique.append(r)
+            deduped.append(r)
+
+    # Within each game, only keep the earliest forced win for each winner.
+    # If the same player keeps having a forced win on consecutive positions,
+    # that's the same threat escalating — only the first one is interesting.
+    # A new forced win is kept if the previous one (for that game+winner)
+    # had a gap (i.e. there were positions in between without a forced win).
+    by_game = defaultdict(list)
+    for r in deduped:
+        by_game[r["game_uid"]].append(r)
+
+    unique = []
+    for uid, game_results in by_game.items():
+        game_results.sort(key=lambda r: r["num_stones"])
+        # Track last kept stone count per winner to detect gaps
+        last_kept = {}  # winner -> num_stones of last kept result
+        for r in game_results:
+            w = r["winner"]
+            prev = last_kept.get(w)
+            if prev is None:
+                # First forced win for this winner in this game — keep
+                unique.append(r)
+                last_kept[w] = r["num_stones"]
+            elif r["num_stones"] - prev > 4:
+                # Gap of more than 2 turns (4 stones) — likely a new threat
+                unique.append(r)
+                last_kept[w] = r["num_stones"]
+            # else: same escalating threat, skip
 
     # Sort: fewer stones first (harder puzzles), then longer sequences
     unique.sort(key=lambda r: (r["num_stones"], -len(r["sequence"])))
@@ -443,8 +470,9 @@ def main():
     print(f"\n{'='*55}")
     print(f"  Forced Win Setup Detection Complete")
     print(f"{'='*55}")
-    print(f"  Positions scanned:   {total}")
+    print(f"  Positions scanned:   {processed}")
     print(f"  Forced wins (raw):   {len(results)}")
+    print(f"  After board dedup:   {len(deduped)}")
     print(f"  Unique positions:    {len(unique)}")
     print(f"  Time:                {elapsed:.1f}s ({total/elapsed:.0f} pos/s)")
     print(f"\n  Player A wins: {a_wins}")

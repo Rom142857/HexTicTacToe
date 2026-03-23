@@ -125,7 +125,7 @@ def _load_pattern_values(path):
 
 
 def get_candidates(game):
-    """Return empty cells within hex-distance 1 of any occupied cell."""
+    """Return empty cells within hex-distance 2 of any occupied cell."""
     occupied = list(game.board)
     if not occupied:
         return [(0, 0)]

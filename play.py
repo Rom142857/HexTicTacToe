@@ -1,7 +1,7 @@
 """Pygame interface for Hexagonal Tic-Tac-Toe (infinite grid).
 
 Run this file to play against the AI (you are Player A, AI is Player B).
-Controls: Click to place, R to restart, Q to quit.
+Controls: Click to place, E to toggle edit mode, R to restart, Q to quit.
 """
 
 import sys
@@ -127,8 +127,12 @@ def compute_view(visible_cells):
     return size, ox, oy
 
 
+EDIT_MODE_COLOR = (255, 180, 40)
+
+
 def draw_board(screen, game, visible_cells, hover_hex, hex_size, ox, oy, fonts,
-               human_player=Player.A, ai_stats=None, last_ai_moves=()):
+               human_player=Player.A, ai_stats=None, last_ai_moves=(),
+               edit_mode=False, edit_hover_btn=None):
     font_big, font_med, font_sm = fonts
     screen.fill(BG_COLOR)
 
@@ -147,7 +151,14 @@ def draw_board(screen, game, visible_cells, hover_hex, hex_size, ox, oy, fonts,
         elif player == Player.B:
             fill = PLAYER_B_COLOR
         elif hover_hex == (q, r) and not game.game_over:
-            fill = PLAYER_A_HOVER
+            if edit_mode:
+                # Show preview color based on which mouse button
+                if edit_hover_btn == 3:
+                    fill = tuple(c // 2 for c in PLAYER_B_COLOR)
+                else:
+                    fill = tuple(c // 2 for c in PLAYER_A_COLOR)
+            else:
+                fill = PLAYER_A_HOVER
         else:
             fill = EMPTY_FILL
 
@@ -167,20 +178,28 @@ def draw_board(screen, game, visible_cells, hover_hex, hex_size, ox, oy, fonts,
         pygame.draw.polygon(screen, WIN_BORDER, corners, 3)
 
     # Status text
-    if game.winner != Player.NONE:
+    if edit_mode:
+        status = font_big.render("EDIT MODE", True, EDIT_MODE_COLOR)
+        screen.blit(status, status.get_rect(centerx=WINDOW_WIDTH // 2, y=20))
+        edit_hint = font_med.render(
+            "Left click = Red  |  Right click = Blue  |  Click same to remove",
+            True, SUBTLE_TEXT,
+        )
+        screen.blit(edit_hint, edit_hint.get_rect(centerx=WINDOW_WIDTH // 2, y=55))
+    elif game.winner != Player.NONE:
         name = "You win!" if game.winner == human_player else "AI wins!"
         color = human_color if game.winner == human_player else ai_color
         status = font_big.render(name, True, color)
+        screen.blit(status, status.get_rect(centerx=WINDOW_WIDTH // 2, y=20))
     elif game.game_over:
         status = font_big.render("Draw!", True, TEXT_COLOR)
+        screen.blit(status, status.get_rect(centerx=WINDOW_WIDTH // 2, y=20))
     elif game.current_player != human_player:
         status = font_big.render("AI is thinking...", True, ai_color)
+        screen.blit(status, status.get_rect(centerx=WINDOW_WIDTH // 2, y=20))
     else:
         status = font_big.render("Your turn", True, human_color)
-
-    screen.blit(status, status.get_rect(centerx=WINDOW_WIDTH // 2, y=20))
-
-    if not game.game_over and game.current_player == human_player:
+        screen.blit(status, status.get_rect(centerx=WINDOW_WIDTH // 2, y=20))
         moves_surf = font_med.render(
             f"Moves left: {game.moves_left_in_turn}", True, SUBTLE_TEXT
         )
@@ -192,8 +211,13 @@ def draw_board(screen, game, visible_cells, hover_hex, hex_size, ox, oy, fonts,
                                  True, SUBTLE_TEXT)
         screen.blit(ai_info, ai_info.get_rect(centerx=WINDOW_WIDTH // 2, y=WINDOW_HEIGHT - 50))
 
-    instr = font_sm.render("Click to place  |  SPACE = swap sides  |  R = restart  |  Q = quit",
-                           True, SUBTLE_TEXT)
+    if edit_mode:
+        instr = font_sm.render("E = exit edit  |  R = restart  |  Q = quit", True, SUBTLE_TEXT)
+    else:
+        instr = font_sm.render(
+            "Click to place  |  SPACE = swap sides  |  E = edit  |  R = restart  |  Q = quit",
+            True, SUBTLE_TEXT,
+        )
     screen.blit(instr, instr.get_rect(centerx=WINDOW_WIDTH // 2, y=WINDOW_HEIGHT - 30))
 
     pygame.display.flip()
@@ -219,6 +243,8 @@ def main():
     last_ai_time = 0
     ai_stats = None
     last_ai_moves = ()
+    edit_mode = False
+    edit_hover_btn = 1  # track last mouse button for hover preview
 
     while True:
         now = pygame.time.get_ticks()
@@ -232,31 +258,66 @@ def main():
                 sys.exit()
 
             elif event.type == pygame.MOUSEMOTION:
-                if game.current_player == human_player and not game.game_over:
-                    q, r = pixel_to_hex(*event.pos, hex_size, ox, oy)
+                q, r = pixel_to_hex(*event.pos, hex_size, ox, oy)
+                if edit_mode:
+                    if (q, r) in visible_cells:
+                        hover_hex = (q, r)
+                    else:
+                        hover_hex = None
+                elif game.current_player == human_player and not game.game_over:
                     if (q, r) in visible_cells and game.is_valid_move(q, r):
                         hover_hex = (q, r)
                     else:
                         hover_hex = None
 
-            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                if game.current_player == human_player and not game.game_over:
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if edit_mode:
                     q, r = pixel_to_hex(*event.pos, hex_size, ox, oy)
-                    if (q, r) in visible_cells and game.make_move(q, r):
-                        hover_hex = None
-                        last_ai_time = now
+                    if event.button == 1:  # Left click = Red (Player A)
+                        if game.board.get((q, r)) == Player.A:
+                            del game.board[(q, r)]
+                        else:
+                            game.board[(q, r)] = Player.A
+                    elif event.button == 3:  # Right click = Blue (Player B)
+                        if game.board.get((q, r)) == Player.B:
+                            del game.board[(q, r)]
+                        else:
+                            game.board[(q, r)] = Player.B
+                    edit_hover_btn = event.button
+                elif event.button == 1:
+                    if game.current_player == human_player and not game.game_over:
+                        q, r = pixel_to_hex(*event.pos, hex_size, ox, oy)
+                        if (q, r) in visible_cells and game.make_move(q, r):
+                            hover_hex = None
+                            last_ai_time = now
 
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_r:
+                if event.key == pygame.K_e:
+                    edit_mode = not edit_mode
+                    if not edit_mode:
+                        # Exiting edit mode: Red always goes next, AI plays
+                        game.current_player = Player.A
+                        game.moves_left_in_turn = 1 if not game.board else 2
+                        game.move_count = len(game.board)
+                        game.winner = Player.NONE
+                        game.winning_cells = []
+                        game.game_over = False
+                        human_player = Player.B  # AI is now Red, will move next
+                        last_ai_time = now
+                        ai_stats = None
+                        last_ai_moves = ()
+                    hover_hex = None
+                elif event.key == pygame.K_r:
                     game.reset()
                     human_player = Player.A
                     hover_hex = None
                     ai_stats = None
                     last_ai_moves = ()
+                    edit_mode = False
                 elif event.key == pygame.K_q:
                     pygame.quit()
                     sys.exit()
-                elif event.key == pygame.K_SPACE and not game.game_over:
+                elif event.key == pygame.K_SPACE and not game.game_over and not edit_mode:
                     # Swap sides
                     human_player = Player.B if human_player == Player.A else Player.A
                     last_ai_time = now
@@ -266,7 +327,8 @@ def main():
         if (game.current_player != human_player and not game.game_over
                 and now - last_ai_time >= AI_MOVE_DELAY):
             draw_board(screen, game, visible_cells, None, hex_size, ox, oy, fonts,
-                       human_player, ai_stats, last_ai_moves)
+                       human_player, ai_stats, last_ai_moves,
+                       edit_mode=edit_mode, edit_hover_btn=edit_hover_btn)
             result = ai.get_move(game)
             last_ai_moves = tuple(tuple(m) for m in result) if ai.pair_moves else (tuple(result),)
             if ai.pair_moves:
@@ -279,7 +341,8 @@ def main():
             last_ai_time = pygame.time.get_ticks()
 
         draw_board(screen, game, visible_cells, hover_hex, hex_size, ox, oy, fonts,
-                   human_player, ai_stats, last_ai_moves)
+                   human_player, ai_stats, last_ai_moves,
+                   edit_mode=edit_mode, edit_hover_btn=edit_hover_btn)
         clock.tick(60)
 
 
