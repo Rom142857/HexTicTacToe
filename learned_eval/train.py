@@ -368,7 +368,7 @@ def split_by_game(positions, val_fraction=0.2, seed=42):
     gid_idx = 4 if len(positions[0]) == 5 else 3
     has_game_ids = len(positions[0]) >= 4
     if has_game_ids:
-        game_ids = sorted({entry[gid_idx] for entry in positions})
+        game_ids = sorted({entry[gid_idx] for entry in positions}, key=str)
         rng.shuffle(game_ids)
         n_val = max(1, int(len(game_ids) * val_fraction))
         val_games = set(game_ids[:n_val])

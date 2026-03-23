@@ -42,10 +42,8 @@ def _board_has_win(board):
 
 
 def _playout_position(args):
-    """Play out a single position with ai_tuned on both sides."""
-    board, cp, original_win, game_id, time_limit, pattern_path = args
-
-    from ai_tuned import MinimaxBot as TunedBot
+    """Play out a single position with the chosen bot on both sides."""
+    board, cp, original_win, game_id, time_limit, pattern_path, use_ai = args
 
     game = HexGame(win_length=6)
     game.board = dict(board)
@@ -53,8 +51,14 @@ def _playout_position(args):
     game.move_count = len(board)
     game.moves_left_in_turn = 2
 
-    bot_a = TunedBot(time_limit=time_limit, pattern_path=pattern_path)
-    bot_b = TunedBot(time_limit=time_limit, pattern_path=pattern_path)
+    if use_ai:
+        from ai import MinimaxBot
+        bot_a = MinimaxBot(time_limit=time_limit)
+        bot_b = MinimaxBot(time_limit=time_limit)
+    else:
+        from ai_tuned import MinimaxBot as TunedBot
+        bot_a = TunedBot(time_limit=time_limit, pattern_path=pattern_path)
+        bot_b = TunedBot(time_limit=time_limit, pattern_path=pattern_path)
     bots = {Player.A: bot_a, Player.B: bot_b}
 
     total_moves = 0
@@ -109,6 +113,8 @@ def main():
                         help="Keep every Nth position per game (default: 3)")
     parser.add_argument("--max-positions", type=int, default=0,
                         help="Max positions to process (0 = all)")
+    parser.add_argument("--use-ai", action="store_true",
+                        help="Use hand-tuned ai.py instead of ai_tuned for playouts")
     args = parser.parse_args()
 
     with open(args.input, "rb") as f:
@@ -168,7 +174,7 @@ def main():
             raw_win = p[3]
             game_id = p[4]
         win_score = 1.0 if raw_win > 0 else -1.0
-        tasks.append((board, cp, win_score, game_id, args.time_limit, args.pattern_path))
+        tasks.append((board, cp, win_score, game_id, args.time_limit, args.pattern_path, args.use_ai))
 
     workers = os.cpu_count() or 1
     print(f"Playing out {len(tasks)} positions with ai_tuned "
