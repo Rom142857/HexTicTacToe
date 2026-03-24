@@ -13,7 +13,6 @@
  *       [0,0, 1,-1, ...],   // movesA: flat [q,r,q,r,...] for player A
  *       [0,1, 2,-1, ...],   // movesB: flat [q,r,q,r,...] for player B
  *       1,                   // currentPlayer: 1=A, 2=B
- *       2,                   // movesLeft: 1 or 2
  *       0.5                  // timeLimit in seconds
  *   );
  *   // result is [q1, r1, q2, r2, depth, nodes, score]
@@ -24,7 +23,6 @@
 #include "engine.h"
 #include "pattern_data.h"
 
-// Persistent bot instance (keeps TT/history across calls).
 static opt::MinimaxBot g_bot;
 static bool g_initialized = false;
 
@@ -37,21 +35,33 @@ static void ensure_init() {
 
 // Returns [q1, r1, q2, r2, depth, nodes, score]
 emscripten::val getMove(emscripten::val movesA, emscripten::val movesB,
-                        int currentPlayer, int movesLeft, double timeLimit) {
+                        int currentPlayer, double timeLimit) {
     ensure_init();
 
-    GameState gs;
-
     int lenA = movesA["length"].as<int>();
+    int lenB = movesB["length"].as<int>();
+
+    // Empty board: place at origin
+    if (lenA == 0 && lenB == 0) {
+        auto result = emscripten::val::array();
+        result.call<void>("push", 0);
+        result.call<void>("push", 0);
+        result.call<void>("push", 0);
+        result.call<void>("push", 0);
+        result.call<void>("push", 0);
+        result.call<void>("push", 0);
+        result.call<void>("push", 0.0);
+        return result;
+    }
+
+    GameState gs;
     for (int i = 0; i < lenA; i += 2)
         gs.cells.push_back({movesA[i].as<int>(), movesA[i + 1].as<int>(), P_A});
-
-    int lenB = movesB["length"].as<int>();
     for (int i = 0; i < lenB; i += 2)
         gs.cells.push_back({movesB[i].as<int>(), movesB[i + 1].as<int>(), P_B});
 
     gs.cur_player = static_cast<int8_t>(currentPlayer);
-    gs.moves_left = static_cast<int8_t>(movesLeft);
+    gs.moves_left = 2;
     gs.move_count = static_cast<int>(gs.cells.size());
 
     g_bot.time_limit = timeLimit;
