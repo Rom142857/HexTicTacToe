@@ -19,8 +19,62 @@ from bot import Bot
 from game import Player, HEX_DIRECTIONS
 
 # ── Hyperparameters ──────────────────────────────────────────────────
-_CANDIDATE_CAP = 50          # max single-cell candidates in minimax
-_ROOT_CANDIDATE_CAP = 50     # max single-cell candidates at root
+# Pair masks: number = search order (1=first, 2=second, ...), 0 = skip.
+# Row = rank of m1 (0=best delta), Col = rank of m2. Upper triangle only.
+# Edit these directly to control which combinations are searched and in what order.
+#                          0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15
+_ROOT_PAIR_MASK = (
+    (0, 2, 3, 5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),  #  0
+    (0, 0, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0),  #  1
+    (0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0),  #  2
+    (0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0),  #  3
+    (0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  4
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  5
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  6
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  7
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  8
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  9
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # 10
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # 11
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # 12
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # 13
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # 14
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # 15
+)
+#                          0   1   2   3   4   5   6   7   8   9  10
+_INNER_PAIR_MASK = (
+    (0, 2, 3, 4, 6, 8, 11, 12, 13, 14, 15),  #  0
+    (0, 0, 5, 7, 9, 0, 0, 0, 0, 0, 0),  #  1
+    (0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0),  #  2
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  3
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  4
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  5
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  6
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  7
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  8
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  9
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # 10
+)
+_ROOT_CANDIDATE_CAP = len(_ROOT_PAIR_MASK)
+_CANDIDATE_CAP = len(_INNER_PAIR_MASK)
+
+def _build_pairs(mask):
+    """Build ordered pair list from mask.
+    0 = skip, 1 = auto-order (by i+j then i), 2+ = explicit priority (searched first)."""
+    explicit = []  # (priority, i, j)
+    auto = []      # (i+j, i, j)
+    for i, row in enumerate(mask):
+        for j, v in enumerate(row):
+            if v >= 2:
+                explicit.append((v, i, j))
+            elif v == 1:
+                auto.append((i + j, i, j))
+    explicit.sort()
+    auto.sort()
+    return tuple([(i, j) for _, i, j in explicit] + [(i, j) for _, i, j in auto])
+
+_ROOT_PAIRS = _build_pairs(_ROOT_PAIR_MASK)
+_INNER_PAIRS = _build_pairs(_INNER_PAIR_MASK)
 _NEIGHBOR_DIST = 2           # hex distance for candidate generation
 _DELTA_WEIGHT = 1.5          # weight of eval delta vs history in move ordering
 _MAX_QDEPTH = 16             # max depth for quiescence threat search
@@ -272,24 +326,9 @@ class MinimaxBot(Bot):
             return [(0, 0)]
 
         maximizing = game.current_player == self._player
-        m1_cands, win_turn = self._generate_m1_candidates(game, _ROOT_CANDIDATE_CAP)
-        if win_turn:
-            return list(win_turn)
-        if not m1_cands:
+        turns = self._generate_turns(game)
+        if not turns:
             return [(0, 0)]
-
-        # Build initial turns: each m1 paired with greedy m2
-        turns = []
-        for m1 in m1_cands:
-            p1 = game.current_player
-            s1 = (p1, game.moves_left_in_turn, game.winner, game.game_over)
-            self._make(game, m1[0], m1[1])
-            if game.game_over:
-                m2 = m1  # won on m1, m2 is dummy
-            else:
-                m2 = self._pick_m2(game, m1)
-            self._undo(game, m1[0], m1[1], s1, p1)
-            turns.append((m1, m2))
 
         best_move = list(turns[0])
 
@@ -595,104 +634,40 @@ class MinimaxBot(Bot):
         for cell, state, player in reversed(undo_info):
             self._undo(game, cell[0], cell[1], state, player)
 
-    def _generate_m1_candidates(self, game, cap):
-        """Return ranked list of m1 candidate cells."""
+    def _generate_turns(self, game):
         win_turn = self._find_instant_win(game, game.current_player)
         if win_turn:
-            return None, win_turn  # signal: use this turn directly
+            return [win_turn]
 
         candidates = list(self._cand_set)
-        if not candidates:
-            return [], None
+        if len(candidates) < 2:
+            if candidates:
+                return [(candidates[0], candidates[0])]
+            return []
 
         is_a = game.current_player == Player.A
         move_delta = self._move_delta
         maximizing = game.current_player == self._player
 
-        delta_sign = _DELTA_WEIGHT if maximizing else -_DELTA_WEIGHT
-        history = self._history
-        candidates.sort(
-            key=lambda c: history.get(c, 0) + move_delta(c[0], c[1], is_a) * delta_sign,
-            reverse=True)
-        candidates = candidates[:cap]
+        candidates.sort(key=lambda c: move_delta(c[0], c[1], is_a), reverse=maximizing)
+        candidates = candidates[:_ROOT_CANDIDATE_CAP]
 
-        # Colony candidate
+        # Colony candidate: a random hex at max distance from the board cluster.
+        # Represents starting a separate group far from the main action.
         occupied = list(game.board)
-        if occupied:
-            cq = sum(q for q, r in occupied) // len(occupied)
-            cr = sum(r for q, r in occupied) // len(occupied)
-            max_r = max(hex_distance(q - cq, r - cr) for q, r in occupied)
-            colony_dist = max_r + 3
-            dq, dr = random.choice(_COLONY_DIRS)
-            colony = (cq + dq * colony_dist, cr + dr * colony_dist)
-            if colony not in game.board and colony not in candidates:
-                candidates.append(colony)
+        cq = sum(q for q, r in occupied) // len(occupied)
+        cr = sum(r for q, r in occupied) // len(occupied)
+        max_r = max(hex_distance(q - cq, r - cr) for q, r in occupied)
+        colony_dist = max_r + 3
+        dq, dr = random.choice(_COLONY_DIRS)
+        colony = (cq + dq * colony_dist, cr + dr * colony_dist)
+        if colony not in game.board:
+            candidates.append(colony)
 
-        return candidates, None
-
-    def _pick_m2(self, game, m1):
-        """After m1 is placed, pick best m2 greedily.
-
-        Priority: block opponent threats, then best eval delta.
-        Returns the chosen m2 cell.
-        """
-        current = game.current_player
-        opponent = Player.B if current == Player.A else Player.A
-        is_a = current == Player.A
-        maximizing = current == self._player
-        sign = 1 if maximizing else -1
-
-        # Check if we must block opponent threats
-        must_hit = self._get_must_hit_threats(game, opponent)
-
-        # Candidates for m2: all candidate cells except m1
-        cand = self._cand_set
-
-        if must_hit:
-            # m2 must land in every remaining must-hit window
-            # (m1 already blocks some; filter to windows m1 didn't cover)
-            remaining = [w for w in must_hit if m1 not in w]
-            if remaining:
-                # m2 must be in the intersection of all remaining windows
-                valid = remaining[0]
-                for w in remaining[1:]:
-                    valid = valid & w
-                valid = valid & cand
-                if valid:
-                    # Among valid blocking cells, pick best by eval delta
-                    return max(valid,
-                               key=lambda c: self._move_delta(c[0], c[1], is_a) * sign)
-
-        # No threats or m1 already covers them: pick best by eval delta
-        best = None
-        best_d = -math.inf
-        for c in cand:
-            d = self._move_delta(c[0], c[1], is_a) * sign
-            if d > best_d:
-                best_d = d
-                best = c
-        return best if best is not None else m1
-
-    def _get_must_hit_threats(self, game, opponent):
-        """Return list of frozensets: empty cells in each near-win opponent window."""
-        p_idx = 0 if opponent == Player.A else 1
-        o_idx = 1 - p_idx
-        hot = self._hot_a if opponent == Player.A else self._hot_b
-        wc = self._wc
-        board = game.board
-        must_hit = []
-        for wkey in hot:
-            counts = wc[wkey]
-            if counts[p_idx] >= _WIN_LENGTH - 2 and counts[o_idx] == 0:
-                d_idx, sq, sr = wkey
-                dq, dr = _DIR_VECTORS[d_idx]
-                empties = frozenset(
-                    (sq + j * dq, sr + j * dr)
-                    for j in range(_WIN_LENGTH)
-                    if (sq + j * dq, sr + j * dr) not in board
-                )
-                must_hit.append(empties)
-        return must_hit
+        n = len(candidates)
+        turns = [(candidates[i], candidates[j]) for i, j in _ROOT_PAIRS
+                 if i < n and j < n]
+        return self._filter_turns_by_threats(game, turns)
 
     def _generate_threat_turns(self, game, my_threats, opp_threats):
         """Generate threat turns: block opponent threats first, else make own.
@@ -947,22 +922,9 @@ class MinimaxBot(Bot):
                 reverse=True)
             candidates = candidates[:_CANDIDATE_CAP]
 
-            # For each m1 candidate, pick greedy best m2
-            turns = []
-            seen = set()
-            for m1 in candidates:
-                p1 = game.current_player
-                s1 = (p1, game.moves_left_in_turn, game.winner, game.game_over)
-                self._make(game, m1[0], m1[1])
-                if game.game_over:
-                    m2 = m1
-                else:
-                    m2 = self._pick_m2(game, m1)
-                self._undo(game, m1[0], m1[1], s1, p1)
-                pair = (min(m1, m2), max(m1, m2))
-                if pair not in seen:
-                    seen.add(pair)
-                    turns.append((m1, m2))
+            n = len(candidates)
+            turns = [(candidates[i], candidates[j]) for i, j in _INNER_PAIRS
+                     if i < n and j < n]
             turns = self._filter_turns_by_threats(game, turns)
 
         if not turns:

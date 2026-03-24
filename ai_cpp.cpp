@@ -1,8 +1,8 @@
 /*
  * ai_cpp.cpp — C++ port of ai.py for maximum search performance.
  *
- * Optimized variant: uses ankerl::unordered_dense flat hash maps
- * instead of flat_map for ~2-3x faster hash table operations.
+ * Board and window data stored in fixed 140x140 flat arrays for
+ * cache-friendly O(1) access.  TT and history remain as hash maps.
  *
  * Build:
  *     python setup.py build_ext --inplace
@@ -43,7 +43,7 @@
 #include <utility>
 #include <vector>
 
-// ── Alias flat hash containers ──
+// ── Alias flat hash containers (still used for TT + history) ──
 template <typename K, typename V, typename H = ankerl::unordered_dense::hash<K>>
 using flat_map = ankerl::unordered_dense::map<K, V, H>;
 
@@ -53,7 +53,7 @@ using flat_set = ankerl::unordered_dense::set<K, H>;
 namespace py = pybind11;
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Constants  (mirror ai.py hyperparameters exactly)
+//  Constants
 // ═══════════════════════════════════════════════════════════════════════
 static constexpr int    CANDIDATE_CAP      = 11;
 static constexpr int    ROOT_CANDIDATE_CAP = 13;
@@ -64,7 +64,12 @@ static constexpr int    WIN_LENGTH         = 6;
 static constexpr double WIN_SCORE          = 100000000.0;
 static constexpr double INF_SCORE          = std::numeric_limits<double>::infinity();
 
-// Player ids — match game.Player enum values
+// Array dimensions — covers coordinates [-70, 69] with padding for
+// windows (±5) and neighbor candidates (±2).
+static constexpr int ARR = 140;
+static constexpr int OFF = 70;
+
+// Player ids
 static constexpr int8_t P_NONE = 0;
 static constexpr int8_t P_A    = 1;
 static constexpr int8_t P_B    = 2;
@@ -75,9 +80,8 @@ static constexpr int8_t TT_LOWER = 1;
 static constexpr int8_t TT_UPPER = 2;
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Coordinate packing
+//  Coordinate packing  (still used for Coord values in vectors/turns)
 // ═══════════════════════════════════════════════════════════════════════
-// A cell (q, r) is packed into a single int64_t.
 using Coord = int64_t;
 
 static inline Coord pack(int q, int r) {
@@ -87,22 +91,12 @@ static inline Coord pack(int q, int r) {
 static inline int pack_q(Coord c) { return static_cast<int32_t>(static_cast<uint32_t>(c >> 32)); }
 static inline int pack_r(Coord c) { return static_cast<int32_t>(static_cast<uint32_t>(c)); }
 
-// Lexicographic comparison matching Python tuple comparison on (q, r).
 static inline bool coord_lt(Coord a, Coord b) {
     int aq = pack_q(a), ar = pack_r(a), bq = pack_q(b), br = pack_r(b);
     return (aq < bq) || (aq == bq && ar < br);
 }
 static inline Coord coord_min(Coord a, Coord b) { return coord_lt(a, b) ? a : b; }
 static inline Coord coord_max(Coord a, Coord b) { return coord_lt(a, b) ? b : a; }
-
-// Window key: packs (d_idx, q, r) into int64_t.
-// d_idx occupies the top byte; q and r are biased into 28-bit fields.
-static constexpr int WKEY_BIAS = 0x8000000; // 2^27
-static inline int64_t pack_wkey(int d_idx, int q, int r) {
-    return (static_cast<int64_t>(static_cast<uint8_t>(d_idx)) << 56) |
-           (static_cast<int64_t>(static_cast<uint32_t>(q + WKEY_BIAS) & 0x0FFFFFFFu) << 28) |
-            static_cast<int64_t>(static_cast<uint32_t>(r + WKEY_BIAS) & 0x0FFFFFFFu);
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Types
@@ -141,7 +135,65 @@ struct TTEntry {
     bool   has_move;
 };
 
-struct TimeUp {};  // thrown on time-out
+struct TimeUp {};
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Helper structs for array-backed sets
+// ═══════════════════════════════════════════════════════════════════════
+struct HotEntry { int d, qi, ri; };
+
+struct HotSet {
+    bool bits[3][ARR][ARR];
+    std::vector<HotEntry> vec;
+
+    void clear() { std::memset(bits, 0, sizeof(bits)); vec.clear(); }
+
+    void insert(int d, int qi, int ri) {
+        if (!bits[d][qi][ri]) {
+            bits[d][qi][ri] = true;
+            vec.push_back({d, qi, ri});
+        }
+    }
+
+    void erase(int d, int qi, int ri) {
+        if (bits[d][qi][ri]) {
+            bits[d][qi][ri] = false;
+            for (size_t i = 0; i < vec.size(); i++) {
+                if (vec[i].d == d && vec[i].qi == qi && vec[i].ri == ri) {
+                    vec[i] = vec.back(); vec.pop_back(); break;
+                }
+            }
+        }
+    }
+};
+
+struct CandSet {
+    bool bits[ARR][ARR];
+    std::vector<Coord> vec;
+
+    void clear() { std::memset(bits, 0, sizeof(bits)); vec.clear(); }
+    bool empty() const { return vec.empty(); }
+    size_t size() const { return vec.size(); }
+    bool count(Coord c) const { return bits[pack_q(c) + OFF][pack_r(c) + OFF]; }
+
+    void insert(Coord c) {
+        int qi = pack_q(c) + OFF, ri = pack_r(c) + OFF;
+        if (!bits[qi][ri]) { bits[qi][ri] = true; vec.push_back(c); }
+    }
+
+    void erase(Coord c) {
+        int qi = pack_q(c) + OFF, ri = pack_r(c) + OFF;
+        if (bits[qi][ri]) {
+            bits[qi][ri] = false;
+            for (size_t i = 0; i < vec.size(); i++) {
+                if (vec[i] == c) { vec[i] = vec.back(); vec.pop_back(); break; }
+            }
+        }
+    }
+
+    auto begin() const { return vec.begin(); }
+    auto end()   const { return vec.end(); }
+};
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Direction arrays
@@ -161,6 +213,23 @@ static inline int hex_distance(int dq, int dr) {
     return std::max({std::abs(dq), std::abs(dr), std::abs(dq + dr)});
 }
 
+// Zobrist tables — flat arrays, deterministic per (q, r) via splitmix64.
+// Values depend only on coordinates, not on generation order, so the TT
+// behaves identically to the lazy hash-map approach in ai_cpp_og.
+static uint64_t g_zobrist_a[ARR][ARR];
+static uint64_t g_zobrist_b[ARR][ARR];
+
+static inline uint64_t splitmix64(uint64_t x) {
+    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31; return x;
+}
+
+static inline uint64_t get_zobrist(int q, int r, int8_t player) {
+    return (player == P_A) ? g_zobrist_a[q + OFF][r + OFF]
+                           : g_zobrist_b[q + OFF][r + OFF];
+}
+
 static bool g_tables_ready = false;
 static void ensure_tables() {
     if (g_tables_ready) return;
@@ -171,22 +240,17 @@ static void ensure_tables() {
         for (int dr = -NEIGHBOR_DIST; dr <= NEIGHBOR_DIST; dr++)
             if ((dq || dr) && hex_distance(dq, dr) <= NEIGHBOR_DIST)
                 g_nb_offsets.push_back({dq, dr});
+    // Zobrist values: deterministic per (q, r), independent of generation order.
+    // Seed 0xa02bdbf7bb3c0195 is arbitrary; the P_B table uses a different base.
+    for (int i = 0; i < ARR; i++)
+        for (int j = 0; j < ARR; j++) {
+            int q = i - OFF, r = j - OFF;
+            uint64_t base = static_cast<uint64_t>(static_cast<uint32_t>(q)) << 32
+                          | static_cast<uint64_t>(static_cast<uint32_t>(r));
+            g_zobrist_a[i][j] = splitmix64(base ^ 0xa02bdbf7bb3c0195ULL);
+            g_zobrist_b[i][j] = splitmix64(base ^ 0x3f84d5b5b5470917ULL);
+        }
     g_tables_ready = true;
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-//  Zobrist tables (lazy, global, never cleared)
-// ═══════════════════════════════════════════════════════════════════════
-static flat_map<Coord, uint64_t> g_zobrist_a, g_zobrist_b;
-static std::mt19937_64 g_zobrist_rng(12345);
-
-static inline uint64_t get_zobrist(Coord c, int8_t player) {
-    auto& tbl = (player == P_A) ? g_zobrist_a : g_zobrist_b;
-    auto it = tbl.find(c);
-    if (it != tbl.end()) return it->second;
-    uint64_t v = g_zobrist_rng();
-    tbl[c] = v;
-    return v;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -202,6 +266,7 @@ public:
     int    _nodes      = 0;
     double last_score  = 0;
     double last_ebf    = 0;
+    int    max_depth   = 200;  // cap for iterative deepening (set from Python)
 
     // ── Constructors ──
     MinimaxBot() : time_limit(0.05), _rng(std::random_device{}()) { ensure_tables(); }
@@ -216,7 +281,7 @@ public:
     // ── Main entry point ──
     py::list get_move(py::object game);
 
-    // ── Pickle support (needed for multiprocessing) ──
+    // ── Pickle support ──
     py::tuple getstate() const {
         py::bytes pv_bytes(reinterpret_cast<const char*>(_pv.data()),
                            _pv.size() * sizeof(double));
@@ -232,60 +297,76 @@ public:
         int  pv_size     = t[2].cast<int>();
         _eval_length     = t[3].cast<int>();
         _pattern_path_str = t[4].cast<std::string>();
-
         _pv.resize(pv_size);
         std::memcpy(_pv.data(), pv_str.data(), pv_size * sizeof(double));
-
         _rng = std::mt19937(std::random_device{}());
         _build_eval_tables();
     }
 
 private:
     // ── Pattern data ──
-    std::vector<double>  _pv;          // pattern_int -> eval value
+    std::vector<double>  _pv;
     int                  _eval_length = 6;
     std::vector<EvalOff> _eval_offsets;
     std::vector<int>     _pow3;
     std::string          _pattern_path_str;
 
-    // ── Internal game state ──
-    flat_map<Coord, int8_t> _board;
+    // ── Board state (flat arrays) ──
+    int8_t _board[ARR][ARR] = {};
+    std::vector<Coord> _board_cells;
+
     int8_t _cur_player  = P_A;
     int8_t _moves_left  = 1;
     int8_t _winner      = P_NONE;
     bool   _game_over   = false;
-    int    _move_count   = 0;
+    int    _move_count  = 0;
+
+    // ── 6-cell window counts ──
+    std::pair<int8_t,int8_t> _wc[3][ARR][ARR] = {};
+    HotSet _hot_a, _hot_b;
+
+    // ── N-cell eval window patterns ──
+    int _wp[3][ARR][ARR] = {};
+
+    // ── Candidates ──
+    int8_t  _cand_rc[ARR][ARR] = {};
+    CandSet _cand_set;
+    std::vector<int> _rc_stack;
 
     // ── Search state ──
     using Clock = std::chrono::steady_clock;
     Clock::time_point _deadline;
     uint64_t _hash      = 0;
-    int8_t   _player    = P_A;   // side we are maximising for
-    int8_t   _cell_a    = 1;     // pattern encoding for A stones
-    int8_t   _cell_b    = 2;     // pattern encoding for B stones
+    int8_t   _player    = P_A;
+    int8_t   _cell_a    = 1;
+    int8_t   _cell_b    = 2;
     double   _eval_score = 0;
 
-    // ── 6-cell window counts  (win/threat detection) ──
-    flat_map<int64_t, std::pair<int8_t,int8_t>> _wc;
-    flat_set<int64_t> _hot_a, _hot_b;
-
-    // ── N-cell eval window patterns ──
-    flat_map<int64_t, int> _wp;  // wkey -> pattern_int
-
-    // ── Candidates ──
-    flat_map<Coord, int> _cand_rc;   // refcount
-    flat_set<Coord>      _cand_set;
-    std::vector<int>               _rc_stack;
-
-    // ── Transposition table & history ──
+    // ── Transposition table & history (hash maps) ──
     flat_map<uint64_t, TTEntry> _tt;
     flat_map<Coord, int>        _history;
 
-    // ── RNG (for colony direction) ──
+    // ── RNG ──
     std::mt19937 _rng;
 
+    // ── Saved state for TimeUp rollback ──
+    struct SavedArrays {
+        int8_t board[ARR][ARR];
+        std::pair<int8_t,int8_t> wc[3][ARR][ARR];
+        int wp[3][ARR][ARR];
+        int8_t cand_rc[ARR][ARR];
+        bool cand_bits[ARR][ARR];
+        std::vector<Coord> cand_vec;
+        bool hot_a_bits[3][ARR][ARR];
+        std::vector<HotEntry> hot_a_vec;
+        bool hot_b_bits[3][ARR][ARR];
+        std::vector<HotEntry> hot_b_vec;
+        std::vector<Coord> board_cells;
+    };
+    std::unique_ptr<SavedArrays> _saved;
+
     // ────────────────────────────────────────────────────────────────
-    //  Pattern loading  (calls back into Python ai._load_pattern_values)
+    //  Pattern loading
     // ────────────────────────────────────────────────────────────────
     void _load_patterns(py::object pattern_path) {
         py::module_ ai_mod = py::module_::import("ai");
@@ -295,15 +376,12 @@ private:
         else
             path = pattern_path.cast<std::string>();
         _pattern_path_str = path;
-
         py::tuple result = ai_mod.attr("_load_pattern_values")(path).cast<py::tuple>();
         py::list  pv_list = result[0].cast<py::list>();
         _eval_length      = result[1].cast<int>();
-
         _pv.resize(pv_list.size());
         for (size_t i = 0; i < pv_list.size(); i++)
             _pv[i] = pv_list[i].cast<double>();
-
         _build_eval_tables();
     }
 
@@ -340,30 +418,29 @@ private:
     // ────────────────────────────────────────────────────────────────
     void _make(int q, int r) {
         int8_t player = _cur_player;
-        Coord  cell   = pack(q, r);
 
         // Zobrist
-        _hash ^= get_zobrist(cell, player);
+        _hash ^= get_zobrist(q, r, player);
 
-        // Cell value for pattern encoding
         int8_t cell_val = (player == P_A) ? _cell_a : _cell_b;
+        int qi = q + OFF, ri = r + OFF;
 
         // ── 6-cell windows ──
         bool won = false;
         if (player == P_A) {
             for (const auto& wo : g_win_offsets) {
-                int64_t wkey = pack_wkey(wo.d_idx, q - wo.oq, r - wo.or_);
-                auto& counts = _wc[wkey];  // default {0,0}
+                int sqi = qi - wo.oq, sri = ri - wo.or_;
+                auto& counts = _wc[wo.d_idx][sqi][sri];
                 counts.first++;
-                if (counts.first >= 4) _hot_a.insert(wkey);
+                if (counts.first >= 4) _hot_a.insert(wo.d_idx, sqi, sri);
                 if (counts.first == WIN_LENGTH && counts.second == 0) won = true;
             }
         } else {
             for (const auto& wo : g_win_offsets) {
-                int64_t wkey = pack_wkey(wo.d_idx, q - wo.oq, r - wo.or_);
-                auto& counts = _wc[wkey];
+                int sqi = qi - wo.oq, sri = ri - wo.or_;
+                auto& counts = _wc[wo.d_idx][sqi][sri];
                 counts.second++;
-                if (counts.second >= 4) _hot_b.insert(wkey);
+                if (counts.second >= 4) _hot_b.insert(wo.d_idx, sqi, sri);
                 if (counts.second == WIN_LENGTH && counts.first == 0) won = true;
             }
         }
@@ -371,36 +448,35 @@ private:
         // ── N-cell eval windows ──
         const double* pv = _pv.data();
         for (const auto& eo : _eval_offsets) {
-            int64_t wkey8 = pack_wkey(3 + eo.d_idx, q - eo.oq, r - eo.or_);
-            auto it = _wp.find(wkey8);
-            int old_pi = (it != _wp.end()) ? it->second : 0;
+            int sqi = qi - eo.oq, sri = ri - eo.or_;
+            int& slot = _wp[eo.d_idx][sqi][sri];
+            int old_pi = slot;
             int new_pi = old_pi + cell_val * _pow3[eo.k];
             _eval_score += pv[new_pi] - pv[old_pi];
-            if (it != _wp.end())
-                it->second = new_pi;
-            else
-                _wp[wkey8] = new_pi;
+            slot = new_pi;
         }
 
-        // ── Candidates  (BEFORE placing stone, matching Python order) ──
+        // ── Candidates ──
+        Coord cell = pack(q, r);
         _cand_set.erase(cell);
-        auto rc_it = _cand_rc.find(cell);
-        _rc_stack.push_back((rc_it != _cand_rc.end()) ? rc_it->second : 0);
-        if (rc_it != _cand_rc.end()) _cand_rc.erase(rc_it);
+        _rc_stack.push_back(_cand_rc[qi][ri]);
+        _cand_rc[qi][ri] = 0;
 
         for (const auto& nb : g_nb_offsets) {
-            Coord nc = pack(q + nb.dq, r + nb.dr);
-            _cand_rc[nc]++;
-            if (!_board.count(nc))
-                _cand_set.insert(nc);
+            int nq = q + nb.dq, nr = r + nb.dr;
+            int nqi = nq + OFF, nri = nr + OFF;
+            _cand_rc[nqi][nri]++;
+            if (_board[nqi][nri] == 0)
+                _cand_set.insert(pack(nq, nr));
         }
 
         // Place stone
-        _board[cell] = player;
+        _board[qi][ri] = player;
+        _board_cells.push_back(cell);
         _move_count++;
 
         if (won) {
-            _winner   = player;
+            _winner    = player;
             _game_over = true;
         } else {
             _moves_left--;
@@ -412,10 +488,11 @@ private:
     }
 
     void _undo(int q, int r, const SavedState& st, int8_t player) {
-        Coord cell = pack(q, r);
+        int qi = q + OFF, ri = r + OFF;
 
         // Remove stone
-        _board.erase(cell);
+        _board[qi][ri] = 0;
+        _board_cells.pop_back();
         _move_count--;
         _cur_player = st.cur_player;
         _moves_left = st.moves_left;
@@ -423,62 +500,57 @@ private:
         _game_over  = st.game_over;
 
         // Zobrist
-        _hash ^= get_zobrist(cell, player);
+        _hash ^= get_zobrist(q, r, player);
 
         int8_t cell_val = (player == P_A) ? _cell_a : _cell_b;
 
         // ── 6-cell windows ──
         if (player == P_A) {
             for (const auto& wo : g_win_offsets) {
-                int64_t wkey = pack_wkey(wo.d_idx, q - wo.oq, r - wo.or_);
-                auto& counts = _wc[wkey];
+                int sqi = qi - wo.oq, sri = ri - wo.or_;
+                auto& counts = _wc[wo.d_idx][sqi][sri];
                 counts.first--;
-                if (counts.first < 4) _hot_a.erase(wkey);
+                if (counts.first < 4) _hot_a.erase(wo.d_idx, sqi, sri);
             }
         } else {
             for (const auto& wo : g_win_offsets) {
-                int64_t wkey = pack_wkey(wo.d_idx, q - wo.oq, r - wo.or_);
-                auto& counts = _wc[wkey];
+                int sqi = qi - wo.oq, sri = ri - wo.or_;
+                auto& counts = _wc[wo.d_idx][sqi][sri];
                 counts.second--;
-                if (counts.second < 4) _hot_b.erase(wkey);
+                if (counts.second < 4) _hot_b.erase(wo.d_idx, sqi, sri);
             }
         }
 
         // ── N-cell eval windows ──
         const double* pv = _pv.data();
         for (const auto& eo : _eval_offsets) {
-            int64_t wkey8 = pack_wkey(3 + eo.d_idx, q - eo.oq, r - eo.or_);
-            int old_pi = _wp[wkey8];
+            int sqi = qi - eo.oq, sri = ri - eo.or_;
+            int& slot = _wp[eo.d_idx][sqi][sri];
+            int old_pi = slot;
             int new_pi = old_pi - cell_val * _pow3[eo.k];
             _eval_score += pv[new_pi] - pv[old_pi];
-            if (new_pi == 0)
-                _wp.erase(wkey8);
-            else
-                _wp[wkey8] = new_pi;
+            slot = new_pi;
         }
 
         // ── Candidates ──
         for (const auto& nb : g_nb_offsets) {
-            Coord nc = pack(q + nb.dq, r + nb.dr);
-            auto it = _cand_rc.find(nc);
-            int c = it->second - 1;
-            if (c == 0) {
-                _cand_rc.erase(it);
-                _cand_set.erase(nc);
-            } else {
-                it->second = c;
-            }
+            int nq = q + nb.dq, nr = r + nb.dr;
+            int nqi = nq + OFF, nri = nr + OFF;
+            _cand_rc[nqi][nri]--;
+            if (_cand_rc[nqi][nri] == 0)
+                _cand_set.erase(pack(nq, nr));
         }
         int saved_rc = _rc_stack.back();
         _rc_stack.pop_back();
         if (saved_rc > 0) {
-            _cand_rc[cell] = saved_rc;
+            Coord cell = pack(q, r);
+            _cand_rc[qi][ri] = saved_rc;
             _cand_set.insert(cell);
         }
     }
 
     // ────────────────────────────────────────────────────────────────
-    //  Turn make / undo  (a turn = pair of moves)
+    //  Turn make / undo
     // ────────────────────────────────────────────────────────────────
     int _make_turn(const Turn& turn, UndoStep steps[2]) {
         int q1 = pack_q(turn.first),  r1 = pack_r(turn.first);
@@ -500,17 +572,15 @@ private:
     }
 
     // ────────────────────────────────────────────────────────────────
-    //  Move delta  (read-only eval change for placing at q,r)
+    //  Move delta
     // ────────────────────────────────────────────────────────────────
     double _move_delta(int q, int r, bool is_a) const {
         int8_t cell_val = is_a ? _cell_a : _cell_b;
         const double* pv = _pv.data();
+        int qi = q + OFF, ri = r + OFF;
         double delta = 0.0;
         for (const auto& eo : _eval_offsets) {
-            int64_t wkey8 = pack_wkey(3 + eo.d_idx, q - eo.oq, r - eo.or_);
-            int old_pi = 0;
-            auto it = _wp.find(wkey8);
-            if (it != _wp.end()) old_pi = it->second;
+            int old_pi = _wp[eo.d_idx][qi - eo.oq][ri - eo.or_];
             int new_pi = old_pi + cell_val * _pow3[eo.k];
             delta += pv[new_pi] - pv[old_pi];
         }
@@ -518,32 +588,27 @@ private:
     }
 
     // ────────────────────────────────────────────────────────────────
-    //  Win / threat detection  (6-cell windows)
+    //  Win / threat detection
     // ────────────────────────────────────────────────────────────────
-    // Returns {found, turn}.  If !found the turn is meaningless.
     std::pair<bool, Turn> _find_instant_win(int8_t player) const {
         int p_idx = (player == P_A) ? 0 : 1;
         const auto& hot = (player == P_A) ? _hot_a : _hot_b;
 
-        for (int64_t wkey : hot) {
-            auto wit = _wc.find(wkey);
-            if (wit == _wc.end()) continue;
-            int my_count  = (p_idx == 0) ? wit->second.first : wit->second.second;
-            int opp_count = (p_idx == 0) ? wit->second.second : wit->second.first;
+        for (const auto& he : hot.vec) {
+            auto& counts = _wc[he.d][he.qi][he.ri];
+            int my_count  = (p_idx == 0) ? counts.first : counts.second;
+            int opp_count = (p_idx == 0) ? counts.second : counts.first;
 
             if (my_count >= WIN_LENGTH - 2 && opp_count == 0) {
-                // Extract window start
-                int d_idx = static_cast<int>(static_cast<uint8_t>(wkey >> 56));
-                int sq = static_cast<int>((static_cast<uint64_t>(wkey) >> 28) & 0x0FFFFFFFu) - WKEY_BIAS;
-                int sr = static_cast<int>( static_cast<uint64_t>(wkey)        & 0x0FFFFFFFu) - WKEY_BIAS;
-                int dq = DIR_Q[d_idx], dr = DIR_R[d_idx];
+                int sq = he.qi - OFF, sr = he.ri - OFF;
+                int dq = DIR_Q[he.d], dr = DIR_R[he.d];
 
                 Coord cells[WIN_LENGTH];
                 int n = 0;
                 for (int j = 0; j < WIN_LENGTH; j++) {
-                    Coord c = pack(sq + j * dq, sr + j * dr);
-                    if (!_board.count(c))
-                        cells[n++] = c;
+                    int cq = sq + j * dq, cr = sr + j * dr;
+                    if (_board[cq + OFF][cr + OFF] == 0)
+                        cells[n++] = pack(cq, cr);
                 }
                 if (n == 1) {
                     Coord other = cells[0];
@@ -566,21 +631,18 @@ private:
         int p_idx = (player == P_A) ? 0 : 1;
         const auto& hot = (player == P_A) ? _hot_a : _hot_b;
 
-        for (int64_t wkey : hot) {
-            auto wit = _wc.find(wkey);
-            if (wit == _wc.end()) continue;
-            int opp_count = (p_idx == 0) ? wit->second.second : wit->second.first;
+        for (const auto& he : hot.vec) {
+            auto& counts = _wc[he.d][he.qi][he.ri];
+            int opp_count = (p_idx == 0) ? counts.second : counts.first;
             if (opp_count != 0) continue;
 
-            int d_idx = static_cast<int>(static_cast<uint8_t>(wkey >> 56));
-            int sq = static_cast<int>((static_cast<uint64_t>(wkey) >> 28) & 0x0FFFFFFFu) - WKEY_BIAS;
-            int sr = static_cast<int>( static_cast<uint64_t>(wkey)        & 0x0FFFFFFFu) - WKEY_BIAS;
-            int dq = DIR_Q[d_idx], dr = DIR_R[d_idx];
+            int sq = he.qi - OFF, sr = he.ri - OFF;
+            int dq = DIR_Q[he.d], dr = DIR_R[he.d];
 
             for (int j = 0; j < WIN_LENGTH; j++) {
-                Coord c = pack(sq + j * dq, sr + j * dr);
-                if (!_board.count(c))
-                    threats.insert(c);
+                int cq = sq + j * dq, cr = sr + j * dr;
+                if (_board[cq + OFF][cr + OFF] == 0)
+                    threats.insert(pack(cq, cr));
             }
         }
         return threats;
@@ -591,25 +653,21 @@ private:
         int p_idx = (opponent == P_A) ? 0 : 1;
         const auto& hot = (opponent == P_A) ? _hot_a : _hot_b;
 
-        // Collect must-hit sets
         std::vector<flat_set<Coord>> must_hit;
-        for (int64_t wkey : hot) {
-            auto wit = _wc.find(wkey);
-            if (wit == _wc.end()) continue;
-            int my_count  = (p_idx == 0) ? wit->second.first  : wit->second.second;
-            int opp_count = (p_idx == 0) ? wit->second.second : wit->second.first;
+        for (const auto& he : hot.vec) {
+            auto& counts = _wc[he.d][he.qi][he.ri];
+            int my_count  = (p_idx == 0) ? counts.first  : counts.second;
+            int opp_count = (p_idx == 0) ? counts.second : counts.first;
             if (my_count < WIN_LENGTH - 2 || opp_count != 0) continue;
 
-            int d_idx = static_cast<int>(static_cast<uint8_t>(wkey >> 56));
-            int sq = static_cast<int>((static_cast<uint64_t>(wkey) >> 28) & 0x0FFFFFFFu) - WKEY_BIAS;
-            int sr = static_cast<int>( static_cast<uint64_t>(wkey)        & 0x0FFFFFFFu) - WKEY_BIAS;
-            int dq = DIR_Q[d_idx], dr = DIR_R[d_idx];
+            int sq = he.qi - OFF, sr = he.ri - OFF;
+            int dq = DIR_Q[he.d], dr = DIR_R[he.d];
 
             flat_set<Coord> empties;
             for (int j = 0; j < WIN_LENGTH; j++) {
-                Coord c = pack(sq + j * dq, sr + j * dr);
-                if (!_board.count(c))
-                    empties.insert(c);
+                int cq = sq + j * dq, cr = sr + j * dr;
+                if (_board[cq + OFF][cr + OFF] == 0)
+                    empties.insert(pack(cq, cr));
             }
             must_hit.push_back(std::move(empties));
         }
@@ -645,13 +703,14 @@ private:
         bool is_a = (_cur_player == P_A);
         bool maximizing = (_cur_player == _player);
 
-        // Sort by move_delta
         std::vector<std::pair<double, Coord>> scored;
         scored.reserve(cands.size());
         for (Coord c : cands)
             scored.push_back({_move_delta(pack_q(c), pack_r(c), is_a), c});
         std::sort(scored.begin(), scored.end(), [maximizing](const auto& a, const auto& b) {
-            return maximizing ? (a.first > b.first) : (a.first < b.first);
+            if (a.first != b.first)
+                return maximizing ? (a.first > b.first) : (a.first < b.first);
+            return a.second < b.second;  // deterministic tie-break by coord
         });
 
         cands.clear();
@@ -660,25 +719,26 @@ private:
             cands.push_back(scored[i].second);
 
         // Colony candidate
-        if (!_board.empty()) {
+        if (!_board_cells.empty()) {
             int64_t sq = 0, sr = 0;
-            for (const auto& kv : _board) { sq += pack_q(kv.first); sr += pack_r(kv.first); }
-            int cq = static_cast<int>(sq / static_cast<int64_t>(_board.size()));
-            int cr = static_cast<int>(sr / static_cast<int64_t>(_board.size()));
+            for (Coord c : _board_cells) { sq += pack_q(c); sr += pack_r(c); }
+            int cq = static_cast<int>(sq / static_cast<int64_t>(_board_cells.size()));
+            int cr = static_cast<int>(sr / static_cast<int64_t>(_board_cells.size()));
             int max_r = 0;
-            for (const auto& kv : _board) {
-                int d = hex_distance(pack_q(kv.first) - cq, pack_r(kv.first) - cr);
+            for (Coord c : _board_cells) {
+                int d = hex_distance(pack_q(c) - cq, pack_r(c) - cr);
                 if (d > max_r) max_r = d;
             }
             int cd = max_r + 3;
             std::uniform_int_distribution<int> dist(0, 5);
             int di = dist(_rng);
-            Coord colony = pack(cq + COLONY_DQ[di] * cd, cr + COLONY_DR[di] * cd);
-            if (!_board.count(colony))
-                cands.push_back(colony);
+            int col_q = cq + COLONY_DQ[di] * cd;
+            int col_r = cr + COLONY_DR[di] * cd;
+            if (std::abs(col_q) < OFF && std::abs(col_r) < OFF &&
+                _board[col_q + OFF][col_r + OFF] == 0)
+                cands.push_back(pack(col_q, col_r));
         }
 
-        // All pairs
         int n = static_cast<int>(cands.size());
         std::vector<Turn> turns;
         turns.reserve(n * (n - 1) / 2);
@@ -726,7 +786,6 @@ private:
             return pairs;
         }
 
-        // Single threat cell — pair with best companion
         Coord tc = (*primary)[0];
         Coord best_comp = tc;
         double best_d = -INF_SCORE;
@@ -845,7 +904,7 @@ private:
     }
 
     // ────────────────────────────────────────────────────────────────
-    //  Minimax with alpha-beta and TT
+    //  Minimax
     // ────────────────────────────────────────────────────────────────
     double _minimax(int depth, double alpha, double beta) {
         _check_time();
@@ -900,21 +959,19 @@ private:
                 int p_idx = (opponent == P_A) ? 0 : 1;
                 const auto& hot = (opponent == P_A) ? _hot_a : _hot_b;
                 std::vector<flat_set<Coord>> must_hit;
-                for (int64_t wkey : hot) {
-                    auto wit = _wc.find(wkey);
-                    if (wit == _wc.end()) continue;
-                    int mc = (p_idx == 0) ? wit->second.first  : wit->second.second;
-                    int oc = (p_idx == 0) ? wit->second.second : wit->second.first;
+                for (const auto& he : hot.vec) {
+                    auto& counts = _wc[he.d][he.qi][he.ri];
+                    int mc = (p_idx == 0) ? counts.first  : counts.second;
+                    int oc = (p_idx == 0) ? counts.second : counts.first;
                     if (mc < WIN_LENGTH - 2 || oc != 0) continue;
 
-                    int d_idx = static_cast<int>(static_cast<uint8_t>(wkey >> 56));
-                    int sq = static_cast<int>((static_cast<uint64_t>(wkey) >> 28) & 0x0FFFFFFFu) - WKEY_BIAS;
-                    int sr = static_cast<int>( static_cast<uint64_t>(wkey)        & 0x0FFFFFFFu) - WKEY_BIAS;
-                    int dq = DIR_Q[d_idx], dr = DIR_R[d_idx];
+                    int sq = he.qi - OFF, sr = he.ri - OFF;
+                    int dq = DIR_Q[he.d], dr = DIR_R[he.d];
                     flat_set<Coord> empties;
                     for (int j = 0; j < WIN_LENGTH; j++) {
-                        Coord c = pack(sq + j * dq, sr + j * dr);
-                        if (!_board.count(c)) empties.insert(c);
+                        int cq = sq + j * dq, cr = sr + j * dr;
+                        if (_board[cq + OFF][cr + OFF] == 0)
+                            empties.insert(pack(cq, cr));
                     }
                     must_hit.push_back(std::move(empties));
                 }
@@ -967,7 +1024,10 @@ private:
                     scored.push_back({h + _move_delta(pack_q(c), pack_r(c), is_a) * dsign, c});
                 }
                 std::sort(scored.begin(), scored.end(),
-                    [](const auto& a, const auto& b) { return a.first > b.first; });
+                    [](const auto& a, const auto& b) {
+                        if (a.first != b.first) return a.first > b.first;
+                        return a.second < b.second;  // deterministic tie-break
+                    });
 
                 cands.clear();
                 int cap = std::min(static_cast<int>(scored.size()), CANDIDATE_CAP);
@@ -1043,10 +1103,9 @@ private:
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-//  get_move — top-level entry point
+//  get_move
 // ═══════════════════════════════════════════════════════════════════════
 py::list MinimaxBot::get_move(py::object game) {
-    // ── Extract board from Python ──
     py::dict py_board = game.attr("board").cast<py::dict>();
 
     if (py_board.empty()) {
@@ -1059,13 +1118,24 @@ py::list MinimaxBot::get_move(py::object game) {
     py::object  PyA = game_mod.attr("Player").attr("A");
     py::object  PyB = game_mod.attr("Player").attr("B");
 
-    _board.clear();
-    _board.reserve(py_board.size() + 64);
+    // ── Clear arrays ──
+    std::memset(_board, 0, sizeof(_board));
+    std::memset(_wc, 0, sizeof(_wc));
+    std::memset(_wp, 0, sizeof(_wp));
+    std::memset(_cand_rc, 0, sizeof(_cand_rc));
+    _board_cells.clear();
+    _hot_a.clear();
+    _hot_b.clear();
+    _cand_set.clear();
+    _rc_stack.clear();
+
+    // ── Populate board from Python ──
     for (auto item : py_board) {
         py::tuple key = item.first.cast<py::tuple>();
         int q = key[0].cast<int>(), r = key[1].cast<int>();
         int8_t p = item.second.is(PyA) ? P_A : P_B;
-        _board[pack(q, r)] = p;
+        _board[q + OFF][r + OFF] = p;
+        _board_cells.push_back(pack(q, r));
     }
 
     py::object py_cur = game.attr("current_player");
@@ -1093,79 +1163,74 @@ py::list MinimaxBot::get_move(py::object game) {
 
     // ── Zobrist ──
     _hash = 0;
-    for (const auto& kv : _board)
-        _hash ^= get_zobrist(kv.first, kv.second);
+    for (Coord c : _board_cells)
+        _hash ^= get_zobrist(pack_q(c), pack_r(c),
+                              _board[pack_q(c) + OFF][pack_r(c) + OFF]);
 
     // ── Cell value mapping ──
     if (_player == P_A) { _cell_a = 1; _cell_b = 2; }
     else                { _cell_a = 2; _cell_b = 1; }
 
     // ── Init 6-cell windows ──
-    _wc.clear();
-    _hot_a.clear();
-    _hot_b.clear();
-    {
-        flat_set<int64_t> seen;
-        for (const auto& kv : _board) {
-            int bq = pack_q(kv.first), br = pack_r(kv.first);
-            for (const auto& wo : g_win_offsets) {
-                int64_t wkey = pack_wkey(wo.d_idx, bq - wo.oq, br - wo.or_);
-                if (!seen.insert(wkey).second) continue;
-                int d = wo.d_idx;
-                int sq = bq - wo.oq, sr = br - wo.or_;
-                int ac = 0, bc = 0;
-                for (int j = 0; j < WIN_LENGTH; j++) {
-                    auto it = _board.find(pack(sq + j * DIR_Q[d], sr + j * DIR_R[d]));
-                    if (it != _board.end()) { if (it->second == P_A) ac++; else bc++; }
-                }
-                if (ac || bc) _wc[wkey] = {static_cast<int8_t>(ac), static_cast<int8_t>(bc)};
+    for (Coord c : _board_cells) {
+        int bq = pack_q(c), br = pack_r(c);
+        int bqi = bq + OFF, bri = br + OFF;
+        for (const auto& wo : g_win_offsets) {
+            int sqi = bqi - wo.oq, sri = bri - wo.or_;
+            auto& counts = _wc[wo.d_idx][sqi][sri];
+            if (counts.first != 0 || counts.second != 0) continue; // already computed
+            int d = wo.d_idx;
+            int sq = bq - wo.oq, sr = br - wo.or_;
+            int ac = 0, bc = 0;
+            for (int j = 0; j < WIN_LENGTH; j++) {
+                int8_t v = _board[sq + j * DIR_Q[d] + OFF][sr + j * DIR_R[d] + OFF];
+                if (v == P_A) ac++;
+                else if (v == P_B) bc++;
             }
-        }
-        for (const auto& kv : _wc) {
-            if (kv.second.first  >= 4) _hot_a.insert(kv.first);
-            if (kv.second.second >= 4) _hot_b.insert(kv.first);
+            if (ac || bc) {
+                counts = {static_cast<int8_t>(ac), static_cast<int8_t>(bc)};
+                if (ac >= 4) _hot_a.insert(d, sqi, sri);
+                if (bc >= 4) _hot_b.insert(d, sqi, sri);
+            }
         }
     }
 
     // ── Init N-cell eval windows ──
-    _wp.clear();
     _eval_score = 0.0;
     {
         const double* pv = _pv.data();
-        flat_set<int64_t> seen;
-        for (const auto& kv : _board) {
-            int bq = pack_q(kv.first), br = pack_r(kv.first);
+        for (Coord c : _board_cells) {
+            int bq = pack_q(c), br = pack_r(c);
+            int bqi = bq + OFF, bri = br + OFF;
             for (const auto& eo : _eval_offsets) {
-                int64_t wkey8 = pack_wkey(3 + eo.d_idx, bq - eo.oq, br - eo.or_);
-                if (!seen.insert(wkey8).second) continue;
+                int sqi = bqi - eo.oq, sri = bri - eo.or_;
+                int& slot = _wp[eo.d_idx][sqi][sri];
+                if (slot != 0) continue; // already computed
                 int sq = bq - eo.oq, sr = br - eo.or_;
                 int d = eo.d_idx;
                 int pi = 0;
                 bool has = false;
                 for (int j = 0; j < _eval_length; j++) {
-                    auto it = _board.find(pack(sq + j * DIR_Q[d], sr + j * DIR_R[d]));
-                    if (it != _board.end()) {
-                        pi += ((it->second == P_A) ? _cell_a : _cell_b) * _pow3[j];
+                    int8_t v = _board[sq + j * DIR_Q[d] + OFF][sr + j * DIR_R[d] + OFF];
+                    if (v != 0) {
+                        pi += ((v == P_A) ? _cell_a : _cell_b) * _pow3[j];
                         has = true;
                     }
                 }
-                if (has) { _wp[wkey8] = pi; _eval_score += pv[pi]; }
+                if (has) { slot = pi; _eval_score += pv[pi]; }
             }
         }
     }
 
     // ── Init candidates ──
-    _cand_rc.clear();
-    _cand_set.clear();
-    _rc_stack.clear();
-    for (const auto& kv : _board) {
-        int bq = pack_q(kv.first), br = pack_r(kv.first);
+    for (Coord c : _board_cells) {
+        int bq = pack_q(c), br = pack_r(c);
         for (const auto& nb : g_nb_offsets) {
-            Coord nc = pack(bq + nb.dq, br + nb.dr);
-            if (!_board.count(nc)) {
-                _cand_rc[nc]++;
-                _cand_set.insert(nc);
-            }
+            int nq = bq + nb.dq, nr = br + nb.dr;
+            int nqi = nq + OFF, nri = nr + OFF;
+            _cand_rc[nqi][nri]++;
+            if (_board[nqi][nri] == 0)
+                _cand_set.insert(pack(nq, nr));
         }
     }
 
@@ -1186,19 +1251,24 @@ py::list MinimaxBot::get_move(py::object game) {
     Turn best_move = turns[0];
 
     // ── Save state for TimeUp rollback ──
-    auto saved_board    = _board;
+    if (!_saved) _saved = std::make_unique<SavedArrays>();
+    std::memcpy(_saved->board, _board, sizeof(_board));
+    std::memcpy(_saved->wc, _wc, sizeof(_wc));
+    std::memcpy(_saved->wp, _wp, sizeof(_wp));
+    std::memcpy(_saved->cand_rc, _cand_rc, sizeof(_cand_rc));
+    std::memcpy(_saved->cand_bits, _cand_set.bits, sizeof(_cand_set.bits));
+    _saved->cand_vec = _cand_set.vec;
+    std::memcpy(_saved->hot_a_bits, _hot_a.bits, sizeof(_hot_a.bits));
+    _saved->hot_a_vec = _hot_a.vec;
+    std::memcpy(_saved->hot_b_bits, _hot_b.bits, sizeof(_hot_b.bits));
+    _saved->hot_b_vec = _hot_b.vec;
+    _saved->board_cells = _board_cells;
     auto saved_st       = SavedState{_cur_player, _moves_left, _winner, _game_over};
     int  saved_mc       = _move_count;
     uint64_t saved_hash = _hash;
     double   saved_eval = _eval_score;
-    auto saved_wc       = _wc;
-    auto saved_wp       = _wp;
-    auto saved_cs       = _cand_set;
-    auto saved_cr       = _cand_rc;
-    auto saved_ha       = _hot_a;
-    auto saved_hb       = _hot_b;
 
-    for (int depth = 1; depth < 200; depth++) {
+    for (int depth = 1; depth <= max_depth; depth++) {
         try {
             int nb4 = _nodes;
             auto root_result = _search_root(turns, depth);
@@ -1212,7 +1282,6 @@ py::list MinimaxBot::get_move(py::object game) {
             if (nthis > 1)
                 last_ebf = std::round(std::pow(static_cast<double>(nthis),
                                                1.0 / depth) * 10.0) / 10.0;
-            // Re-order turns for next iteration
             std::sort(turns.begin(), turns.end(),
                 [&scores, maximizing](const Turn& a, const Turn& b) {
                     double sa = 0, sb = 0;
@@ -1222,7 +1291,17 @@ py::list MinimaxBot::get_move(py::object game) {
                 });
             if (std::abs(last_score) >= WIN_SCORE) break;
         } catch (const TimeUp&) {
-            _board      = std::move(saved_board);
+            std::memcpy(_board, _saved->board, sizeof(_board));
+            std::memcpy(_wc, _saved->wc, sizeof(_wc));
+            std::memcpy(_wp, _saved->wp, sizeof(_wp));
+            std::memcpy(_cand_rc, _saved->cand_rc, sizeof(_cand_rc));
+            std::memcpy(_cand_set.bits, _saved->cand_bits, sizeof(_cand_set.bits));
+            _cand_set.vec = std::move(_saved->cand_vec);
+            std::memcpy(_hot_a.bits, _saved->hot_a_bits, sizeof(_hot_a.bits));
+            _hot_a.vec = std::move(_saved->hot_a_vec);
+            std::memcpy(_hot_b.bits, _saved->hot_b_bits, sizeof(_hot_b.bits));
+            _hot_b.vec = std::move(_saved->hot_b_vec);
+            _board_cells = std::move(_saved->board_cells);
             _move_count = saved_mc;
             _cur_player = saved_st.cur_player;
             _moves_left = saved_st.moves_left;
@@ -1230,17 +1309,10 @@ py::list MinimaxBot::get_move(py::object game) {
             _game_over  = saved_st.game_over;
             _hash       = saved_hash;
             _eval_score = saved_eval;
-            _wc         = std::move(saved_wc);
-            _wp         = std::move(saved_wp);
-            _cand_set   = std::move(saved_cs);
-            _cand_rc    = std::move(saved_cr);
-            _hot_a      = std::move(saved_ha);
-            _hot_b      = std::move(saved_hb);
             break;
         }
     }
 
-    // ── Build Python result ──
     py::list res;
     res.append(py::make_tuple(pack_q(best_move.first),  pack_r(best_move.first)));
     res.append(py::make_tuple(pack_q(best_move.second), pack_r(best_move.second)));
@@ -1253,7 +1325,7 @@ py::list MinimaxBot::get_move(py::object game) {
 //  pybind11 module
 // ═══════════════════════════════════════════════════════════════════════
 PYBIND11_MODULE(ai_cpp, m) {
-    m.doc() = "C++ port of ai.py MinimaxBot (optimized flat hash maps)";
+    m.doc() = "C++ port of ai.py MinimaxBot (flat-array board)";
 
     py::class_<opt::MinimaxBot>(m, "MinimaxBot")
         .def(py::init<double, py::object>(),
@@ -1266,6 +1338,7 @@ PYBIND11_MODULE(ai_cpp, m) {
         .def_readwrite("_nodes",      &opt::MinimaxBot::_nodes)
         .def_readwrite("last_score",  &opt::MinimaxBot::last_score)
         .def_readwrite("last_ebf",    &opt::MinimaxBot::last_ebf)
+        .def_readwrite("max_depth",   &opt::MinimaxBot::max_depth)
         .def("__str__", [](const opt::MinimaxBot&) { return std::string("ai_cpp"); })
         .def(py::pickle(
             [](const opt::MinimaxBot& bot) { return bot.getstate(); },

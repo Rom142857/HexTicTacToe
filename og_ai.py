@@ -19,8 +19,49 @@ from bot import Bot
 from game import Player, HEX_DIRECTIONS
 
 # ── Hyperparameters ──────────────────────────────────────────────────
-_CANDIDATE_CAP = 11          # max single-cell candidates in minimax
-_ROOT_CANDIDATE_CAP = 13     # max single-cell candidates at root
+# Pair masks: 1 = consider this (i,j) pair, upper triangle only.
+# Row = rank of m1 (0=best delta), Col = rank of m2.
+# Edit these directly to control which rank combinations are searched.
+#                        0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
+_ROOT_PAIR_MASK = (
+    (0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),  #  0
+    (0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0),  #  1
+    (0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0),  #  2
+    (0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0),  #  3
+    (0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  4
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  5
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  6
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  7
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  8
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  9
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # 10
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # 11
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # 12
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # 13
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # 14
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # 15
+)
+#                        0  1  2  3  4  5  6  7  8  9 10
+_INNER_PAIR_MASK = (
+    (0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),  #  0
+    (0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0),  #  1
+    (0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0),  #  2
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  3
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  4
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  5
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  6
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  7
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  8
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  #  9
+    (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),  # 10
+)
+_ROOT_CANDIDATE_CAP = len(_ROOT_PAIR_MASK)
+_CANDIDATE_CAP = len(_INNER_PAIR_MASK)
+# Precompute index pairs from masks
+_ROOT_PAIRS = tuple((i, j) for i, row in enumerate(_ROOT_PAIR_MASK)
+                    for j, v in enumerate(row) if v)
+_INNER_PAIRS = tuple((i, j) for i, row in enumerate(_INNER_PAIR_MASK)
+                     for j, v in enumerate(row) if v)
 _NEIGHBOR_DIST = 2           # hex distance for candidate generation
 _DELTA_WEIGHT = 1.5          # weight of eval delta vs history in move ordering
 _MAX_QDEPTH = 16             # max depth for quiescence threat search
@@ -610,7 +651,9 @@ class MinimaxBot(Bot):
         if colony not in game.board:
             candidates.append(colony)
 
-        turns = list(combinations(candidates, 2))
+        n = len(candidates)
+        turns = [(candidates[i], candidates[j]) for i, j in _ROOT_PAIRS
+                 if i < n and j < n]
         return self._filter_turns_by_threats(game, turns)
 
     def _generate_threat_turns(self, game, my_threats, opp_threats):
@@ -866,7 +909,9 @@ class MinimaxBot(Bot):
                 reverse=True)
             candidates = candidates[:_CANDIDATE_CAP]
 
-            turns = list(combinations(candidates, 2))
+            n = len(candidates)
+            turns = [(candidates[i], candidates[j]) for i, j in _INNER_PAIRS
+                     if i < n and j < n]
             turns = self._filter_turns_by_threats(game, turns)
 
         if not turns:

@@ -56,13 +56,16 @@ namespace py = pybind11;
 //  Constants  (mirror ai.py hyperparameters exactly)
 // ═══════════════════════════════════════════════════════════════════════
 static constexpr int    CANDIDATE_CAP      = 11;
-static constexpr int    ROOT_CANDIDATE_CAP = 13;
+static constexpr int    ROOT_CANDIDATE_CAP = 16;
 static constexpr int    NEIGHBOR_DIST      = 2;
 static constexpr double DELTA_WEIGHT       = 1.5;
 static constexpr int    MAX_QDEPTH         = 16;
 static constexpr int    WIN_LENGTH         = 6;
 static constexpr double WIN_SCORE          = 100000000.0;
 static constexpr double INF_SCORE          = std::numeric_limits<double>::infinity();
+
+// Pair masks are defined in ai.py (_ROOT_PAIR_MASK, _INNER_PAIR_MASK).
+// The derived pair lists and valid counts below are hardcoded from those masks.
 
 // Player ids — match game.Player enum values
 static constexpr int8_t P_NONE = 0;
@@ -161,6 +164,25 @@ static inline int hex_distance(int dq, int dr) {
     return std::max({std::abs(dq), std::abs(dr), std::abs(dq + dr)});
 }
 
+// ── Precomputed pair index tables (constexpr, zero runtime cost) ────
+// Derived from ROOT_MASK / INNER_MASK via _build_pairs in ai.py.
+struct IdxPair { int8_t i, j; };
+
+static constexpr int         N_ROOT_PAIRS = 38;
+static constexpr IdxPair     ROOT_PAIRS[N_ROOT_PAIRS] = {
+    {0,1},{0,2},{1,2},{0,3},{0,4},{1,3},{0,5},{1,4},{2,3},
+    {0,6},{1,5},{2,4},{0,7},{1,6},{2,5},{3,4},{0,8},{1,7},
+    {2,6},{3,5},{0,9},{1,8},{2,7},{3,6},{4,5},{0,10},{1,9},
+    {2,8},{3,7},{0,11},{1,10},{2,9},{0,12},{1,11},{0,13},
+    {1,12},{0,14},{0,15},
+};
+
+static constexpr int         N_INNER_PAIRS = 14;
+static constexpr IdxPair     INNER_PAIRS[N_INNER_PAIRS] = {
+    {0,1},{0,2},{0,3},{1,2},{0,4},{1,3},{0,5},{1,4},{2,3},
+    {0,6},{0,7},{0,8},{0,9},{0,10},
+};
+
 static bool g_tables_ready = false;
 static void ensure_tables() {
     if (g_tables_ready) return;
@@ -192,7 +214,7 @@ static inline uint64_t get_zobrist(Coord c, int8_t player) {
 // ═══════════════════════════════════════════════════════════════════════
 //  MinimaxBot
 // ═══════════════════════════════════════════════════════════════════════
-namespace og {
+namespace opt {
 class MinimaxBot {
 public:
     // ── Python-visible attributes ──
@@ -202,7 +224,6 @@ public:
     int    _nodes      = 0;
     double last_score  = 0;
     double last_ebf    = 0;
-    int    max_depth   = 200;
 
     // ── Constructors ──
     MinimaxBot() : time_limit(0.05), _rng(std::random_device{}()) { ensure_tables(); }
@@ -652,9 +673,7 @@ private:
         for (Coord c : cands)
             scored.push_back({_move_delta(pack_q(c), pack_r(c), is_a), c});
         std::sort(scored.begin(), scored.end(), [maximizing](const auto& a, const auto& b) {
-            if (a.first != b.first)
-                return maximizing ? (a.first > b.first) : (a.first < b.first);
-            return a.second < b.second;  // deterministic tie-break by coord
+            return maximizing ? (a.first > b.first) : (a.first < b.first);
         });
 
         cands.clear();
@@ -681,13 +700,15 @@ private:
                 cands.push_back(colony);
         }
 
-        // All pairs
+        // Pairs from constexpr mask table
         int n = static_cast<int>(cands.size());
         std::vector<Turn> turns;
-        turns.reserve(n * (n - 1) / 2);
-        for (int i = 0; i < n; i++)
-            for (int j = i + 1; j < n; j++)
-                turns.push_back({cands[i], cands[j]});
+        turns.reserve(N_ROOT_PAIRS);
+        for (int k = 0; k < N_ROOT_PAIRS; k++) {
+            int pi = ROOT_PAIRS[k].i, pj = ROOT_PAIRS[k].j;
+            if (pi < n && pj < n)
+                turns.push_back({cands[pi], cands[pj]});
+        }
 
         return _filter_turns_by_threats(turns);
     }
@@ -970,20 +991,19 @@ private:
                     scored.push_back({h + _move_delta(pack_q(c), pack_r(c), is_a) * dsign, c});
                 }
                 std::sort(scored.begin(), scored.end(),
-                    [](const auto& a, const auto& b) {
-                        if (a.first != b.first) return a.first > b.first;
-                        return a.second < b.second;  // deterministic tie-break
-                    });
+                    [](const auto& a, const auto& b) { return a.first > b.first; });
 
                 cands.clear();
                 int cap = std::min(static_cast<int>(scored.size()), CANDIDATE_CAP);
                 for (int i = 0; i < cap; i++) cands.push_back(scored[i].second);
 
                 int n = static_cast<int>(cands.size());
-                turns.reserve(n * (n - 1) / 2);
-                for (int i = 0; i < n; i++)
-                    for (int j = i + 1; j < n; j++)
-                        turns.push_back({cands[i], cands[j]});
+                turns.reserve(N_INNER_PAIRS);
+                for (int k = 0; k < N_INNER_PAIRS; k++) {
+                    int pi = INNER_PAIRS[k].i, pj = INNER_PAIRS[k].j;
+                    if (pi < n && pj < n)
+                        turns.push_back({cands[pi], cands[pj]});
+                }
                 turns = _filter_turns_by_threats(turns);
             }
         }
@@ -1204,7 +1224,7 @@ py::list MinimaxBot::get_move(py::object game) {
     auto saved_ha       = _hot_a;
     auto saved_hb       = _hot_b;
 
-    for (int depth = 1; depth <= max_depth; depth++) {
+    for (int depth = 1; depth < 200; depth++) {
         try {
             int nb4 = _nodes;
             auto root_result = _search_root(turns, depth);
@@ -1253,31 +1273,30 @@ py::list MinimaxBot::get_move(py::object game) {
     return res;
 }
 
-} // namespace og
+} // namespace opt
 
 // ═══════════════════════════════════════════════════════════════════════
 //  pybind11 module
 // ═══════════════════════════════════════════════════════════════════════
-PYBIND11_MODULE(ai_cpp_og, m) {
-    m.doc() = "C++ port of ai.py MinimaxBot (baseline)";
+PYBIND11_MODULE(ai_cpp, m) {
+    m.doc() = "C++ port of ai.py MinimaxBot (optimized flat hash maps)";
 
-    py::class_<og::MinimaxBot>(m, "MinimaxBot")
+    py::class_<opt::MinimaxBot>(m, "MinimaxBot")
         .def(py::init<double, py::object>(),
              py::arg("time_limit") = 0.05,
              py::arg("pattern_path") = py::none())
-        .def("get_move", &og::MinimaxBot::get_move, py::arg("game"))
-        .def_readwrite("pair_moves",  &og::MinimaxBot::pair_moves)
-        .def_readwrite("time_limit",  &og::MinimaxBot::time_limit)
-        .def_readwrite("last_depth",  &og::MinimaxBot::last_depth)
-        .def_readwrite("_nodes",      &og::MinimaxBot::_nodes)
-        .def_readwrite("last_score",  &og::MinimaxBot::last_score)
-        .def_readwrite("last_ebf",    &og::MinimaxBot::last_ebf)
-        .def_readwrite("max_depth",   &og::MinimaxBot::max_depth)
-        .def("__str__", [](const og::MinimaxBot&) { return std::string("ai_cpp_og"); })
+        .def("get_move", &opt::MinimaxBot::get_move, py::arg("game"))
+        .def_readwrite("pair_moves",  &opt::MinimaxBot::pair_moves)
+        .def_readwrite("time_limit",  &opt::MinimaxBot::time_limit)
+        .def_readwrite("last_depth",  &opt::MinimaxBot::last_depth)
+        .def_readwrite("_nodes",      &opt::MinimaxBot::_nodes)
+        .def_readwrite("last_score",  &opt::MinimaxBot::last_score)
+        .def_readwrite("last_ebf",    &opt::MinimaxBot::last_ebf)
+        .def("__str__", [](const opt::MinimaxBot&) { return std::string("ai_cpp"); })
         .def(py::pickle(
-            [](const og::MinimaxBot& bot) { return bot.getstate(); },
+            [](const opt::MinimaxBot& bot) { return bot.getstate(); },
             [](py::tuple t) {
-                og::MinimaxBot bot;
+                opt::MinimaxBot bot;
                 bot.setstate(t);
                 return bot;
             }

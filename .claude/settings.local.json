@@ -28,7 +28,8 @@
       "Bash(curl -sL \"https://raw.githubusercontent.com/martinus/unordered_dense/main/include/ankerl/unordered_dense.h\" -o /Users/leedavis/coding/python/ai/HexTicTacToe/ankerl_unordered_dense.h)",
       "Bash(curl -sI \"https://raw.githubusercontent.com/martinus/unordered_dense/main/include/ankerl/stl.h\")",
       "Bash(curl -sL \"https://raw.githubusercontent.com/martinus/unordered_dense/main/include/ankerl/stl.h\" -o /Users/leedavis/coding/python/ai/HexTicTacToe/stl.h)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(source /Users/leedavis/coding/python/ai/HexTicTacToe/.venv/bin/activate)"
     ]
   }
 }

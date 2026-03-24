@@ -16,6 +16,8 @@ setup(
                           cxx_std=17, extra_compile_args=common_args),
         Pybind11Extension("ai_cpp_og", ["ai_cpp_og.cpp"],
                           cxx_std=17, extra_compile_args=common_args),
+        Pybind11Extension("ai_cpp_prof", ["ai_cpp_prof.cpp"],
+                          cxx_std=17, extra_compile_args=common_args),
     ],
     cmdclass={"build_ext": build_ext},
 )

@@ -1,8 +1,9 @@
 /*
- * ai_cpp.cpp — C++ port of ai.py for maximum search performance.
+ * ai_cpp_prof.cpp — Profiled build of ai_cpp.cpp.
  *
- * Optimized variant: uses ankerl::unordered_dense flat hash maps
- * instead of flat_map for ~2-3x faster hash table operations.
+ * Identical search logic with timing instrumentation on leaf functions
+ * (_make, _undo, _find_instant_win, _find_threat_cells, _move_delta,
+ *  _filter_turns_by_threats) plus call/TT/cutoff counters.
  *
  * Build:
  *     python setup.py build_ext --inplace
@@ -144,6 +145,44 @@ struct TTEntry {
 struct TimeUp {};  // thrown on time-out
 
 // ═══════════════════════════════════════════════════════════════════════
+//  Profiling infrastructure
+// ═══════════════════════════════════════════════════════════════════════
+struct ProfileData {
+    // Timing accumulators (nanoseconds) for leaf functions
+    int64_t make_ns = 0, undo_ns = 0;
+    int64_t find_win_ns = 0, find_threats_ns = 0;
+    int64_t move_delta_ns = 0, filter_turns_ns = 0;
+
+    // Call counts for timed functions
+    int64_t make_calls = 0, undo_calls = 0;
+    int64_t find_win_calls = 0, find_threats_calls = 0;
+    int64_t move_delta_calls = 0, filter_turns_calls = 0;
+
+    // Call counts for non-timed functions
+    int64_t minimax_calls = 0, qsearch_calls = 0;
+
+    // Transposition table stats
+    int64_t tt_probes = 0, tt_hits = 0;
+    int64_t tt_exact_cutoffs = 0, tt_bound_cutoffs = 0;
+    int64_t tt_stores = 0;
+
+    // Alpha-beta stats
+    int64_t ab_cutoffs = 0, ab_interior = 0;
+
+    void reset() { *this = ProfileData{}; }
+};
+
+struct ProfTimer {
+    int64_t* ns;
+    std::chrono::steady_clock::time_point t0;
+    ProfTimer(int64_t& acc) : ns(&acc), t0(std::chrono::steady_clock::now()) {}
+    ~ProfTimer() {
+        *ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
 //  Direction arrays
 // ═══════════════════════════════════════════════════════════════════════
 static constexpr int DIR_Q[3] = {1, 0, 1};
@@ -190,9 +229,9 @@ static inline uint64_t get_zobrist(Coord c, int8_t player) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  MinimaxBot
+//  MinimaxBot  (profiled)
 // ═══════════════════════════════════════════════════════════════════════
-namespace og {
+namespace opt {
 class MinimaxBot {
 public:
     // ── Python-visible attributes ──
@@ -202,7 +241,9 @@ public:
     int    _nodes      = 0;
     double last_score  = 0;
     double last_ebf    = 0;
-    int    max_depth   = 200;
+
+    // ── Profiling data (always on in this build) ──
+    mutable ProfileData _prof;
 
     // ── Constructors ──
     MinimaxBot() : time_limit(0.05), _rng(std::random_device{}()) { ensure_tables(); }
@@ -216,6 +257,33 @@ public:
 
     // ── Main entry point ──
     py::list get_move(py::object game);
+
+    // ── Profile access ──
+    py::dict get_profile() const {
+        py::dict d;
+        d["make_ns"] = _prof.make_ns;
+        d["make_calls"] = _prof.make_calls;
+        d["undo_ns"] = _prof.undo_ns;
+        d["undo_calls"] = _prof.undo_calls;
+        d["find_win_ns"] = _prof.find_win_ns;
+        d["find_win_calls"] = _prof.find_win_calls;
+        d["find_threats_ns"] = _prof.find_threats_ns;
+        d["find_threats_calls"] = _prof.find_threats_calls;
+        d["move_delta_ns"] = _prof.move_delta_ns;
+        d["move_delta_calls"] = _prof.move_delta_calls;
+        d["filter_turns_ns"] = _prof.filter_turns_ns;
+        d["filter_turns_calls"] = _prof.filter_turns_calls;
+        d["minimax_calls"] = _prof.minimax_calls;
+        d["qsearch_calls"] = _prof.qsearch_calls;
+        d["tt_probes"] = _prof.tt_probes;
+        d["tt_hits"] = _prof.tt_hits;
+        d["tt_exact_cutoffs"] = _prof.tt_exact_cutoffs;
+        d["tt_bound_cutoffs"] = _prof.tt_bound_cutoffs;
+        d["tt_stores"] = _prof.tt_stores;
+        d["ab_cutoffs"] = _prof.ab_cutoffs;
+        d["ab_interior"] = _prof.ab_interior;
+        return d;
+    }
 
     // ── Pickle support (needed for multiprocessing) ──
     py::tuple getstate() const {
@@ -337,9 +405,12 @@ private:
     }
 
     // ────────────────────────────────────────────────────────────────
-    //  Incremental make / undo
+    //  Incremental make / undo  (PROFILED)
     // ────────────────────────────────────────────────────────────────
     void _make(int q, int r) {
+        ProfTimer _pt(_prof.make_ns);
+        _prof.make_calls++;
+
         int8_t player = _cur_player;
         Coord  cell   = pack(q, r);
 
@@ -413,6 +484,9 @@ private:
     }
 
     void _undo(int q, int r, const SavedState& st, int8_t player) {
+        ProfTimer _pt(_prof.undo_ns);
+        _prof.undo_calls++;
+
         Coord cell = pack(q, r);
 
         // Remove stone
@@ -501,9 +575,12 @@ private:
     }
 
     // ────────────────────────────────────────────────────────────────
-    //  Move delta  (read-only eval change for placing at q,r)
+    //  Move delta  (read-only eval change for placing at q,r)  PROFILED
     // ────────────────────────────────────────────────────────────────
     double _move_delta(int q, int r, bool is_a) const {
+        ProfTimer _pt(_prof.move_delta_ns);
+        _prof.move_delta_calls++;
+
         int8_t cell_val = is_a ? _cell_a : _cell_b;
         const double* pv = _pv.data();
         double delta = 0.0;
@@ -519,10 +596,13 @@ private:
     }
 
     // ────────────────────────────────────────────────────────────────
-    //  Win / threat detection  (6-cell windows)
+    //  Win / threat detection  (6-cell windows)  PROFILED
     // ────────────────────────────────────────────────────────────────
     // Returns {found, turn}.  If !found the turn is meaningless.
     std::pair<bool, Turn> _find_instant_win(int8_t player) const {
+        ProfTimer _pt(_prof.find_win_ns);
+        _prof.find_win_calls++;
+
         int p_idx = (player == P_A) ? 0 : 1;
         const auto& hot = (player == P_A) ? _hot_a : _hot_b;
 
@@ -563,6 +643,9 @@ private:
     }
 
     flat_set<Coord> _find_threat_cells(int8_t player) const {
+        ProfTimer _pt(_prof.find_threats_ns);
+        _prof.find_threats_calls++;
+
         flat_set<Coord> threats;
         int p_idx = (player == P_A) ? 0 : 1;
         const auto& hot = (player == P_A) ? _hot_a : _hot_b;
@@ -588,6 +671,9 @@ private:
     }
 
     std::vector<Turn> _filter_turns_by_threats(const std::vector<Turn>& turns) const {
+        ProfTimer _pt(_prof.filter_turns_ns);
+        _prof.filter_turns_calls++;
+
         int8_t opponent = (_cur_player == P_A) ? P_B : P_A;
         int p_idx = (opponent == P_A) ? 0 : 1;
         const auto& hot = (opponent == P_A) ? _hot_a : _hot_b;
@@ -652,9 +738,7 @@ private:
         for (Coord c : cands)
             scored.push_back({_move_delta(pack_q(c), pack_r(c), is_a), c});
         std::sort(scored.begin(), scored.end(), [maximizing](const auto& a, const auto& b) {
-            if (a.first != b.first)
-                return maximizing ? (a.first > b.first) : (a.first < b.first);
-            return a.second < b.second;  // deterministic tie-break by coord
+            return maximizing ? (a.first > b.first) : (a.first < b.first);
         });
 
         cands.clear();
@@ -744,9 +828,10 @@ private:
     }
 
     // ────────────────────────────────────────────────────────────────
-    //  Quiescence search
+    //  Quiescence search  (PROFILED counter)
     // ────────────────────────────────────────────────────────────────
     double _quiescence(double alpha, double beta, int qdepth) {
+        _prof.qsearch_calls++;
         _check_time();
 
         if (_game_over) {
@@ -843,14 +928,16 @@ private:
         }
 
         double best_sc = maximizing ? alpha : beta;
+        _prof.tt_stores++;
         _tt[_tt_key()] = {depth, best_sc, TT_EXACT, best, true};
         return {best, std::move(scores)};
     }
 
     // ────────────────────────────────────────────────────────────────
-    //  Minimax with alpha-beta and TT
+    //  Minimax with alpha-beta and TT  (PROFILED counters)
     // ────────────────────────────────────────────────────────────────
     double _minimax(int depth, double alpha, double beta) {
+        _prof.minimax_calls++;
         _check_time();
 
         if (_game_over) {
@@ -863,21 +950,25 @@ private:
         Turn tt_move{};
         bool has_tt_move = false;
 
+        // ── TT lookup (profiled) ──
+        _prof.tt_probes++;
         auto tt_it = _tt.find(ttk);
         if (tt_it != _tt.end()) {
+            _prof.tt_hits++;
             const auto& e = tt_it->second;
             has_tt_move = e.has_move;
             tt_move     = e.move;
             if (e.depth >= depth) {
-                if (e.flag == TT_EXACT) return e.score;
+                if (e.flag == TT_EXACT) { _prof.tt_exact_cutoffs++; return e.score; }
                 if (e.flag == TT_LOWER) alpha = std::max(alpha, e.score);
                 if (e.flag == TT_UPPER) beta  = std::min(beta,  e.score);
-                if (alpha >= beta) return e.score;
+                if (alpha >= beta) { _prof.tt_bound_cutoffs++; return e.score; }
             }
         }
 
         if (depth == 0) {
             double sc = _quiescence(alpha, beta, MAX_QDEPTH);
+            _prof.tt_stores++;
             _tt[ttk] = {0, sc, TT_EXACT, {}, false};
             return sc;
         }
@@ -890,6 +981,7 @@ private:
                 int n = _make_turn(wt, steps);
                 double sc = (_winner == _player) ? WIN_SCORE : -WIN_SCORE;
                 _undo_turn(steps, n);
+                _prof.tt_stores++;
                 _tt[ttk] = {depth, sc, TT_EXACT, wt, true};
                 return sc;
             }
@@ -936,6 +1028,7 @@ private:
                     }
                     if (!can_block) {
                         double sc = (opponent != _player) ? -WIN_SCORE : WIN_SCORE;
+                        _prof.tt_stores++;
                         _tt[ttk] = {depth, sc, TT_EXACT, {}, false};
                         return sc;
                     }
@@ -953,6 +1046,7 @@ private:
             if (cands.size() < 2) {
                 if (cands.empty()) {
                     double sc = _eval_score;
+                    _prof.tt_stores++;
                     _tt[ttk] = {depth, sc, TT_EXACT, {}, false};
                     return sc;
                 }
@@ -970,10 +1064,7 @@ private:
                     scored.push_back({h + _move_delta(pack_q(c), pack_r(c), is_a) * dsign, c});
                 }
                 std::sort(scored.begin(), scored.end(),
-                    [](const auto& a, const auto& b) {
-                        if (a.first != b.first) return a.first > b.first;
-                        return a.second < b.second;  // deterministic tie-break
-                    });
+                    [](const auto& a, const auto& b) { return a.first > b.first; });
 
                 cands.clear();
                 int cap = std::min(static_cast<int>(scored.size()), CANDIDATE_CAP);
@@ -990,6 +1081,7 @@ private:
 
         if (turns.empty()) {
             double sc = _eval_score;
+            _prof.tt_stores++;
             _tt[ttk] = {depth, sc, TT_EXACT, {}, false};
             return sc;
         }
@@ -1003,6 +1095,9 @@ private:
         Turn best_move{};
         double value;
 
+        // ── Alpha-beta loop (profiled) ──
+        _prof.ab_interior++;
+
         if (maximizing) {
             value = -INF_SCORE;
             for (const auto& turn : turns) {
@@ -1015,6 +1110,7 @@ private:
                 if (cv > value) { value = cv; best_move = turn; }
                 alpha = std::max(alpha, value);
                 if (alpha >= beta) {
+                    _prof.ab_cutoffs++;
                     _history[turn.first]  += depth * depth;
                     _history[turn.second] += depth * depth;
                     break;
@@ -1032,6 +1128,7 @@ private:
                 if (cv < value) { value = cv; best_move = turn; }
                 beta = std::min(beta, value);
                 if (alpha >= beta) {
+                    _prof.ab_cutoffs++;
                     _history[turn.first]  += depth * depth;
                     _history[turn.second] += depth * depth;
                     break;
@@ -1043,6 +1140,7 @@ private:
         if      (value <= orig_alpha) flag = TT_UPPER;
         else if (value >= orig_beta)  flag = TT_LOWER;
         else                          flag = TT_EXACT;
+        _prof.tt_stores++;
         _tt[ttk] = {depth, value, flag, best_move, true};
         return value;
     }
@@ -1052,6 +1150,9 @@ private:
 //  get_move — top-level entry point
 // ═══════════════════════════════════════════════════════════════════════
 py::list MinimaxBot::get_move(py::object game) {
+    // ── Reset profiling counters ──
+    _prof.reset();
+
     // ── Extract board from Python ──
     py::dict py_board = game.attr("board").cast<py::dict>();
 
@@ -1204,7 +1305,7 @@ py::list MinimaxBot::get_move(py::object game) {
     auto saved_ha       = _hot_a;
     auto saved_hb       = _hot_b;
 
-    for (int depth = 1; depth <= max_depth; depth++) {
+    for (int depth = 1; depth < 200; depth++) {
         try {
             int nb4 = _nodes;
             auto root_result = _search_root(turns, depth);
@@ -1253,31 +1354,31 @@ py::list MinimaxBot::get_move(py::object game) {
     return res;
 }
 
-} // namespace og
+} // namespace opt
 
 // ═══════════════════════════════════════════════════════════════════════
-//  pybind11 module
+//  pybind11 module  (ai_cpp_prof)
 // ═══════════════════════════════════════════════════════════════════════
-PYBIND11_MODULE(ai_cpp_og, m) {
-    m.doc() = "C++ port of ai.py MinimaxBot (baseline)";
+PYBIND11_MODULE(ai_cpp_prof, m) {
+    m.doc() = "Profiled C++ MinimaxBot with timing instrumentation";
 
-    py::class_<og::MinimaxBot>(m, "MinimaxBot")
+    py::class_<opt::MinimaxBot>(m, "MinimaxBot")
         .def(py::init<double, py::object>(),
              py::arg("time_limit") = 0.05,
              py::arg("pattern_path") = py::none())
-        .def("get_move", &og::MinimaxBot::get_move, py::arg("game"))
-        .def_readwrite("pair_moves",  &og::MinimaxBot::pair_moves)
-        .def_readwrite("time_limit",  &og::MinimaxBot::time_limit)
-        .def_readwrite("last_depth",  &og::MinimaxBot::last_depth)
-        .def_readwrite("_nodes",      &og::MinimaxBot::_nodes)
-        .def_readwrite("last_score",  &og::MinimaxBot::last_score)
-        .def_readwrite("last_ebf",    &og::MinimaxBot::last_ebf)
-        .def_readwrite("max_depth",   &og::MinimaxBot::max_depth)
-        .def("__str__", [](const og::MinimaxBot&) { return std::string("ai_cpp_og"); })
+        .def("get_move", &opt::MinimaxBot::get_move, py::arg("game"))
+        .def("get_profile", &opt::MinimaxBot::get_profile)
+        .def_readwrite("pair_moves",  &opt::MinimaxBot::pair_moves)
+        .def_readwrite("time_limit",  &opt::MinimaxBot::time_limit)
+        .def_readwrite("last_depth",  &opt::MinimaxBot::last_depth)
+        .def_readwrite("_nodes",      &opt::MinimaxBot::_nodes)
+        .def_readwrite("last_score",  &opt::MinimaxBot::last_score)
+        .def_readwrite("last_ebf",    &opt::MinimaxBot::last_ebf)
+        .def("__str__", [](const opt::MinimaxBot&) { return std::string("ai_cpp_prof"); })
         .def(py::pickle(
-            [](const og::MinimaxBot& bot) { return bot.getstate(); },
+            [](const opt::MinimaxBot& bot) { return bot.getstate(); },
             [](py::tuple t) {
-                og::MinimaxBot bot;
+                opt::MinimaxBot bot;
                 bot.setstate(t);
                 return bot;
             }
