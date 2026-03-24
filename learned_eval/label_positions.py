@@ -38,7 +38,7 @@ def _eval_position(args):
         return board, cp, 0.0, win_score, game_id
 
     if pattern_path:
-        from ai_tuned import MinimaxBot as TunedBot
+        from ai import MinimaxBot as TunedBot
         bot = TunedBot(time_limit=time_limit, pattern_path=pattern_path)
     else:
         bot = MinimaxBot(time_limit=time_limit)

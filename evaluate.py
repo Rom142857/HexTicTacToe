@@ -328,6 +328,215 @@ def evaluate(bot_a, bot_b, num_games=100, win_length=6, time_limit=0.1,
     return bot_a_wins, bot_b_wins, draws
 
 
+def _play_position_one(args):
+    """Worker for position evaluation. Same bot on both sides."""
+    bot, win_length, max_moves, start_position = args
+    _board, to_move = start_position
+
+    violations = {}
+    exceeded = False
+    try:
+        winner, d_a, d_b, t_a, t_b = play_game(
+            bot, bot, win_length, violations, max_moves,
+            start_position=start_position)
+    except TimeLimitExceeded:
+        exceeded = True
+        winner = Player.NONE
+        d_a, d_b = defaultdict(int), defaultdict(int)
+        t_a, t_b = (0.0, 0), (0.0, 0)
+
+    move_count = t_a[1] + t_b[1]
+    return (winner, to_move, dict(d_a), dict(d_b),
+            exceeded, t_a, t_b, move_count)
+
+
+def evaluate_positions(bot, positions, num_rollouts=20, win_length=6,
+                       time_limit=0.1, use_tqdm=True, max_moves=None):
+    """Play each position num_rollouts times with the same bot on both sides.
+
+    Reports wins/losses from the perspective of the to-move color.
+    """
+    if max_moves is None:
+        max_moves = MAX_MOVES_PER_GAME
+    bot.time_limit = time_limit
+
+    to_move_wins = 0
+    to_move_losses = 0
+    draws = 0
+    aborted = 0
+    depths = defaultdict(int)
+    total_time = [0.0, 0]
+    game_lengths = []
+
+    args = []
+    for pos in positions:
+        for _ in range(num_rollouts):
+            args.append((bot, win_length, max_moves, pos))
+
+    total_games = len(args)
+    workers = os.cpu_count() or 1
+
+    t0 = time.time()
+    with Pool(workers) as pool:
+        results_iter = pool.imap_unordered(_play_position_one, args)
+        if use_tqdm:
+            results_iter = tqdm(results_iter, total=total_games,
+                                desc="Rollouts", unit="game")
+        for result in results_iter:
+            winner, to_move, d_a, d_b, exceeded, t_a, t_b, move_count = result
+
+            if exceeded:
+                aborted += 1
+            else:
+                game_lengths.append(move_count)
+
+            for d, c in d_a.items():
+                depths[d] += c
+            for d, c in d_b.items():
+                depths[d] += c
+            total_time[0] += t_a[0] + t_b[0]
+            total_time[1] += t_a[1] + t_b[1]
+
+            if winner == to_move:
+                to_move_wins += 1
+            elif winner == Player.NONE:
+                draws += 1
+            else:
+                to_move_losses += 1
+
+            if use_tqdm:
+                results_iter.set_postfix(W=to_move_wins, L=to_move_losses, D=draws)
+
+    elapsed = time.time() - t0
+    total = max(to_move_wins + to_move_losses + draws, 1)
+
+    print(f"\n\n{'='*50}")
+    print(f"  {bot} self-play — {len(positions)} positions × {num_rollouts} rollouts"
+          f"  ({total_games} games in {elapsed:.1f}s)")
+    print(f"{'='*50}")
+    print(f"  {'To-move wins':>15s}: {to_move_wins:3d} ({100*to_move_wins/total:.0f}%)")
+    print(f"  {'To-move losses':>15s}: {to_move_losses:3d} ({100*to_move_losses/total:.0f}%)")
+    print(f"  {'Draws':>15s}: {draws:3d} ({100*draws/total:.0f}%)")
+    win_rate = (to_move_wins + 0.5 * draws) / total
+    print(f"\n  To-move win rate: {100*win_rate:.1f}%")
+    print()
+
+    if depths:
+        total_moves = sum(depths.values())
+        avg = sum(d * c for d, c in depths.items()) / total_moves
+        lo, hi = min(depths), max(depths)
+        print(f"  Search depth: avg {avg:.1f}, range [{lo}-{hi}]")
+        buckets = sorted(depths.items())
+        dist = "  ".join(f"d{d}:{c}" for d, c in buckets)
+        print(f"    {dist}")
+
+    if total_time[1] > 0:
+        avg_ms = 1000 * total_time[0] / total_time[1]
+        print(f"  Avg move time: {avg_ms:.0f}ms ({total_time[1]} moves)")
+
+    if game_lengths:
+        avg_len = sum(game_lengths) / len(game_lengths)
+        lo_len, hi_len = min(game_lengths), max(game_lengths)
+        print(f"\n  Game length: avg {avg_len:.1f} moves, range [{lo_len}-{hi_len}]")
+
+    if aborted:
+        print(f"\n  {aborted} games aborted (time limit exceeded)")
+
+    print(f"{'='*50}")
+
+    return to_move_wins, to_move_losses, draws
+
+
+def generate_random_positions(num_positions, num_random_moves=10, win_length=6, seed=42):
+    """Generate diverse starting positions by playing random moves.
+
+    Each position is produced by a RandomBot making num_random_moves moves
+    from an empty board.  Returns a list of (board_dict, current_player) tuples.
+    """
+    rng = random.Random(seed)
+    rbot = RandomBot()
+    positions = []
+    for _ in range(num_positions):
+        game = HexGame(win_length=win_length)
+        for _ in range(num_random_moves):
+            if game.game_over:
+                break
+            move = rbot.get_move(game)
+            game.make_move(*move)
+        if not game.game_over:
+            positions.append((dict(game.board), game.current_player))
+    return positions
+
+
+def _throughput_one(args):
+    """Worker: run get_move on a single position and report stats."""
+    bot, win_length, position, time_limit = args
+    bot.time_limit = time_limit
+    board_dict, current_player = position
+    game = HexGame(win_length=win_length)
+    game.board = dict(board_dict)
+    game.current_player = current_player
+    game.move_count = len(board_dict)
+    game.moves_left_in_turn = 2
+
+    t0 = time.time()
+    bot.get_move(game)
+    elapsed = time.time() - t0
+    return bot._nodes, bot.last_depth, elapsed
+
+
+def throughput_bench(bots, positions, time_limit=0.1, win_length=6, use_tqdm=True):
+    """Benchmark node throughput for one or more bots on shared positions.
+
+    Each bot evaluates every position once (single process, sequential)
+    so timing is not affected by multiprocessing overhead.
+    """
+    print(f"\n{'='*55}")
+    print(f"  Throughput benchmark — {len(positions)} positions, "
+          f"{time_limit:.2f}s per move")
+    print(f"{'='*55}")
+
+    for bot in bots:
+        bot.time_limit = time_limit
+        total_nodes = 0
+        total_time = 0.0
+        depths = defaultdict(int)
+
+        items = enumerate(positions)
+        if use_tqdm:
+            items = tqdm(items, total=len(positions),
+                         desc=str(bot), unit="pos")
+        for _i, (board_dict, current_player) in items:
+            game = HexGame(win_length=win_length)
+            game.board = dict(board_dict)
+            game.current_player = current_player
+            game.move_count = len(board_dict)
+            game.moves_left_in_turn = 2
+
+            t0 = time.time()
+            bot.get_move(game)
+            elapsed = time.time() - t0
+
+            total_nodes += bot._nodes
+            total_time += elapsed
+            depths[bot.last_depth] += 1
+
+        nps = total_nodes / total_time if total_time > 0 else 0
+        avg_depth = (sum(d * c for d, c in depths.items())
+                     / max(sum(depths.values()), 1))
+        avg_ms = 1000 * total_time / max(len(positions), 1)
+
+        print(f"\n  {str(bot):>15s}:")
+        print(f"    {total_nodes:>12,} nodes in {total_time:.2f}s "
+              f"= {nps:,.0f} nodes/sec")
+        print(f"    avg depth {avg_depth:.1f}, avg time {avg_ms:.0f}ms/move")
+        buckets = sorted(depths.items())
+        dist = "  ".join(f"d{d}:{c}" for d, c in buckets)
+        print(f"    {dist}")
+
+    print(f"{'='*55}\n")
+
+
 class NamedBotWrapper:
     """Wraps a MinimaxBot instance with a custom display name."""
     def __init__(self, bot, name):
@@ -372,22 +581,48 @@ if __name__ == "__main__":
                         help="Pickle file of seed positions (default: human game positions)")
     parser.add_argument("--no-positions", action="store_true",
                         help="Disable position seeding (start from empty board)")
+    parser.add_argument("--random-positions", action="store_true",
+                        help="Generate starting positions via random playout instead of human games")
+    parser.add_argument("--random-moves", type=int, default=10,
+                        help="Number of random moves per position (default: 10)")
+    parser.add_argument("--self-play", action="store_true",
+                        help="Self-play position evaluation (one bot, report to-move win rate)")
+    parser.add_argument("--throughput", action="store_true",
+                        help="Run throughput benchmark (nodes/sec) instead of games")
+    parser.add_argument("--throughput-positions", type=int, default=50,
+                        help="Number of positions for throughput bench (default: 50)")
     parsed = parser.parse_args()
 
     if parsed.pattern_a:
-        from ai_tuned import MinimaxBot as TunedBot
+        from ai import MinimaxBot as TunedBot
         a = NamedBotWrapper(TunedBot(pattern_path=parsed.pattern_a), parsed.pattern_a)
     else:
         a = load_bot(parsed.bot_a, time_limit=0.1)
     if parsed.pattern_b:
-        from ai_tuned import MinimaxBot as TunedBot
+        from ai import MinimaxBot as TunedBot
         b = NamedBotWrapper(TunedBot(pattern_path=parsed.pattern_b), parsed.pattern_b)
     else:
         b = load_bot(parsed.bot_b, time_limit=0.1)
 
-    positions = None
-    if not parsed.no_positions and parsed.positions:
-        positions = _load_positions(parsed.positions, parsed.num_games)
+    if parsed.throughput:
+        positions = generate_random_positions(
+            parsed.throughput_positions, num_random_moves=parsed.random_moves)
+        throughput_bench([a, b], positions, use_tqdm=not parsed.no_tqdm)
+        sys.exit(0)
 
-    evaluate(a, b, num_games=parsed.num_games, use_tqdm=not parsed.no_tqdm,
-             positions=positions)
+    positions = None
+    if parsed.random_positions:
+        positions = generate_random_positions(
+            parsed.num_games, num_random_moves=parsed.random_moves)
+    elif not parsed.no_positions and parsed.positions:
+        positions = _load_positions(parsed.positions, num_games=parsed.num_games)
+
+    if parsed.self_play:
+        if positions is None:
+            print("Error: --self-play requires positions (don't use --no-positions)")
+            sys.exit(1)
+        evaluate_positions(a, positions, num_rollouts=parsed.num_games,
+                           use_tqdm=not parsed.no_tqdm)
+    else:
+        evaluate(a, b, num_games=parsed.num_games, positions=positions,
+                 use_tqdm=not parsed.no_tqdm)

@@ -62,7 +62,7 @@ def _playout_position(args):
         bot_a = MinimaxBot(time_limit=time_limit)
         bot_b = MinimaxBot(time_limit=time_limit)
     else:
-        from ai_tuned import MinimaxBot as TunedBot
+        from ai import MinimaxBot as TunedBot
         bot_a = TunedBot(time_limit=time_limit, pattern_path=pattern_path)
         bot_b = TunedBot(time_limit=time_limit, pattern_path=pattern_path)
     bots = {Player.A: bot_a, Player.B: bot_b}

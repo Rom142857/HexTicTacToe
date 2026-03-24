@@ -1,14 +1,17 @@
-"""Minimax bot with iterative deepening, heuristic eval, and transposition table.
+"""Minimax bot using learned pattern evaluation.
 
-Designed for infinite hex grid — no board size limits.
-Uses alpha-beta pruning with Zobrist hashing for a transposition table.
-Window-based evaluation tracks scoring incrementally via dict-keyed windows
-that are created lazily as stones spread across the grid.
+Same search as ai.py (iterative deepening, alpha-beta, TT, incremental eval),
+but replaces the hand-tuned LINE_SCORES with learned pattern values from
+a pattern_values.json file.
 
-Each minimax ply operates on full turns (2 stones), not individual stones.
+Uses two window systems:
+  - 6-cell windows: win detection, threat analysis (hot windows, instant win)
+  - N-cell windows: evaluation scoring via learned pattern lookup (N from model meta)
 """
 
+import json
 import math
+import os
 import random
 import time
 from itertools import combinations
@@ -16,7 +19,6 @@ from bot import Bot
 from game import Player, HEX_DIRECTIONS
 
 # ── Hyperparameters ──────────────────────────────────────────────────
-LINE_SCORES = [0, 0, 8, 1200, 3000, 50000, 100000]  # eval score per stone count in a window
 _CANDIDATE_CAP = 11          # max single-cell candidates in minimax
 _ROOT_CANDIDATE_CAP = 13     # max single-cell candidates at root
 _NEIGHBOR_DIST = 2           # hex distance for candidate generation
@@ -25,6 +27,8 @@ _MAX_QDEPTH = 16             # max depth for quiescence threat search
 
 # 6 unit hex directions for colony candidate selection
 _COLONY_DIRS = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, 1)]
+
+_WIN_LENGTH = 6
 
 
 class TimeUp(Exception):
@@ -36,26 +40,29 @@ def hex_distance(dq, dr):
     return max(abs(dq), abs(dr), abs(ds))
 
 
-
-_WIN_LENGTH = 6
-
-# Zobrist hash table — lazily generated random 64-bit values per (cell, player)
+# Zobrist hash table
 _zobrist_rng = random.Random(42)
 _zobrist = {}
 
-# Window offset patterns: for each direction, the offsets (k*dq, k*dr)
-# so that cell (q, r) belongs to window starting at (q - k*dq, r - k*dr).
-# Each cell belongs to 3 * _WIN_LENGTH = 18 windows.
-_WINDOW_OFFSETS = tuple(
+# Direction vectors
+_DIR_VECTORS = tuple(HEX_DIRECTIONS)
+
+# 6-cell window offsets (for win detection)
+_WIN_OFFSETS = tuple(
     (d_idx, k * dq, k * dr)
     for d_idx, (dq, dr) in enumerate(HEX_DIRECTIONS)
     for k in range(_WIN_LENGTH)
 )
 
-# Direction vectors indexed by dir_index
-_DIR_VECTORS = tuple(HEX_DIRECTIONS)
 
-# Pre-compute neighbor offsets within _NEIGHBOR_DIST (excluding self)
+def _build_eval_offsets(eval_length):
+    return tuple(
+        (d_idx, k, k * dq, k * dr)
+        for d_idx, (dq, dr) in enumerate(HEX_DIRECTIONS)
+        for k in range(eval_length)
+    )
+
+# Neighbor offsets
 _NEIGHBOR_OFFSETS_2 = tuple(
     (dq, dr)
     for dq in range(-_NEIGHBOR_DIST, _NEIGHBOR_DIST + 1)
@@ -63,48 +70,58 @@ _NEIGHBOR_OFFSETS_2 = tuple(
     if hex_distance(dq, dr) <= _NEIGHBOR_DIST and (dq, dr) != (0, 0)
 )
 
-# TT entry flags
+# TT flags
 _EXACT = 0
-_LOWER = 1  # true value >= stored (beta cutoff)
-_UPPER = 2  # true value <= stored (failed low)
+_LOWER = 1
+_UPPER = 2
 
 _WIN_SCORE = 100000000
 
+# Default pattern values path
+_DEFAULT_PATTERN_PATH = os.path.join(
+    os.path.dirname(__file__), "learned_eval", "results_cycle1", "pattern_values.json")
 
-def evaluate_position(game, player):
-    """Score the position from player's perspective on infinite board.
 
-    Finds all unique win_length-cell windows that contain at least one
-    occupied cell, then scores each window based on stone counts.
+def _load_pattern_values(path):
+    """Load pattern_values.json and build a flat lookup array.
+
+    Values in JSON are normalized; multiplied by _meta.score_scale to recover
+    eval-scale units (comparable to LINE_SCORES).
+    Returns (pat_value, eval_length) where pat_value[pattern_int] = eval value.
     """
-    opponent = Player.B if player == Player.A else Player.A
-    score = 0
-    board = game.board
-    wl = game.win_length
+    with open(path) as f:
+        raw = json.load(f)
 
-    seen = set()
-    for (q, r) in board:
-        for d_idx, (dq, dr) in enumerate(HEX_DIRECTIONS):
-            for k in range(wl):
-                wkey = (d_idx, q - k * dq, r - k * dr)
-                if wkey in seen:
-                    continue
-                seen.add(wkey)
-                sq, sr = wkey[1], wkey[2]
-                my_count = 0
-                opp_count = 0
-                for j in range(wl):
-                    p = board.get((sq + j * dq, sr + j * dr))
-                    if p == player:
-                        my_count += 1
-                    elif p is not None:
-                        opp_count += 1
-                if my_count > 0 and opp_count == 0:
-                    score += LINE_SCORES[my_count]
-                elif opp_count > 0 and my_count == 0:
-                    score -= LINE_SCORES[opp_count]
+    meta = raw.get("_meta", {})
+    score_scale = meta.get("score_scale", 1)
+    eval_length = meta.get("window_length", 6)
 
-    return score
+    # Build pattern tables for this window length
+    from learned_eval.pattern_table import build_arrays
+    piece_swap = meta.get("piece_swap_symmetry", False)
+    canon_patterns, canon_index, canon_sign, num_canon, num_patterns = build_arrays(eval_length, enforce_piece_swap=piece_swap)
+
+    # Parse the canonical pattern values
+    canon_by_str = {}
+    for pat_str, val in raw.items():
+        if pat_str != "_meta":
+            canon_by_str[pat_str] = val * score_scale
+
+    params = [0.0] * num_canon
+    for i, pat in enumerate(canon_patterns):
+        pat_str = "".join(str(c) for c in pat)
+        if pat_str in canon_by_str:
+            params[i] = canon_by_str[pat_str]
+
+    # Build PAT_VALUE: pattern_int -> value (me=1, opp=2 perspective)
+    pat_value = [0.0] * num_patterns
+    for pi in range(num_patterns):
+        ci = canon_index[pi]
+        cs = canon_sign[pi]
+        if cs != 0 and ci >= 0:
+            pat_value[pi] = cs * params[ci]
+
+    return pat_value, eval_length
 
 
 def get_candidates(game):
@@ -112,7 +129,6 @@ def get_candidates(game):
     occupied = list(game.board)
     if not occupied:
         return [(0, 0)]
-
     candidates = set()
     board = game.board
     for q, r in occupied:
@@ -124,15 +140,11 @@ def get_candidates(game):
 
 
 class MinimaxBot(Bot):
-    """Iterative-deepening minimax with alpha-beta pruning, TT, and heuristic eval.
+    """Minimax bot with learned pattern evaluation."""
 
-    Each minimax ply = one full turn (2 stones). The first move of the game
-    is hardcoded to (0,0) since the board is infinite and symmetric.
-    """
+    pair_moves = True
 
-    pair_moves = True  # returns both moves of a double turn
-
-    def __init__(self, time_limit=0.05):
+    def __init__(self, time_limit=0.05, pattern_path=None):
         super().__init__(time_limit)
         self._deadline = 0
         self._nodes = 0
@@ -143,8 +155,13 @@ class MinimaxBot(Bot):
         self.last_ebf = 0
         self.last_score = 0
 
+        if pattern_path is None:
+            pattern_path = _DEFAULT_PATTERN_PATH
+        self._pv, self._eval_length = _load_pattern_values(pattern_path)
+        self._eval_offsets = _build_eval_offsets(self._eval_length)
+        self._pow3 = tuple(3 ** k for k in range(self._eval_length))
+
     def get_move(self, game):
-        # First move is arbitrary on infinite board
         if not game.board:
             return [(0, 0)]
 
@@ -155,11 +172,13 @@ class MinimaxBot(Bot):
         self._player = game.current_player
         self._nodes = 0
         self.last_depth = 0
+        self.last_score = 0
         self.last_ebf = 0
+        self.last_score = 0
         if len(self._tt) > 1_000_000:
             self._tt.clear()
 
-        # Compute initial Zobrist hash from board state (lazy generation)
+        # Zobrist hash
         self._hash = 0
         for (q, r), p in game.board.items():
             zkey = (q, r, p)
@@ -169,30 +188,26 @@ class MinimaxBot(Bot):
                 _zobrist[zkey] = v
             self._hash ^= v
 
-        # Build score lookup table for current player perspective.
-        sz = _WIN_LENGTH + 1
-        self._score_table = [[0] * sz for _ in range(sz)]
-        for a in range(sz):
-            for b in range(sz):
-                if self._player == Player.A:
-                    my, opp = a, b
-                else:
-                    my, opp = b, a
-                if my > 0 and opp == 0:
-                    self._score_table[a][b] = LINE_SCORES[my]
-                elif opp > 0 and my == 0:
-                    self._score_table[a][b] = -LINE_SCORES[opp]
+        # Cell value mapping: which raw cell value (1 or 2) corresponds to
+        # "me" and "opp" in the pattern encoding
+        if self._player == Player.A:
+            self._cell_a = 1  # A stones = me = 1
+            self._cell_b = 2  # B stones = opp = 2
+        else:
+            self._cell_a = 2  # A stones = opp = 2
+            self._cell_b = 1  # B stones = me = 1
 
-        # Initialize incremental eval: window counts
-        self._wc = {}
         board = game.board
-        seen = set()
+
+        # ── 6-cell windows: counts for win/threat detection ──
+        self._wc = {}
+        seen6 = set()
         for (q, r) in board:
-            for d_idx, oq, or_ in _WINDOW_OFFSETS:
+            for d_idx, oq, or_ in _WIN_OFFSETS:
                 wkey = (d_idx, q - oq, r - or_)
-                if wkey in seen:
+                if wkey in seen6:
                     continue
-                seen.add(wkey)
+                seen6.add(wkey)
                 dq, dr = _DIR_VECTORS[d_idx]
                 sq, sr = wkey[1], wkey[2]
                 a_count = 0
@@ -206,19 +221,45 @@ class MinimaxBot(Bot):
                 if a_count > 0 or b_count > 0:
                     self._wc[wkey] = [a_count, b_count]
 
-        # Compute initial eval score from window counts + hot window sets
-        self._eval_score = 0
-        self._hot_a = set()  # windows where A has >= 4
-        self._hot_b = set()  # windows where B has >= 4
-        st = self._score_table
+        self._hot_a = set()
+        self._hot_b = set()
         for wkey, counts in self._wc.items():
-            self._eval_score += st[counts[0]][counts[1]]
             if counts[0] >= 4:
                 self._hot_a.add(wkey)
             if counts[1] >= 4:
                 self._hot_b.add(wkey)
 
-        # Initialize incremental candidate set with reference counting.
+        # ── N-cell windows: pattern_ints for eval ──
+        self._wp = {}  # wkey -> pattern_int (me=1, opp=2 encoding)
+        pv = self._pv
+        cell_a = self._cell_a
+        cell_b = self._cell_b
+        pow3 = self._pow3
+        seen8 = set()
+        self._eval_score = 0.0
+        for (q, r) in board:
+            for d_idx, k, oq, or_ in self._eval_offsets:
+                wkey8 = (3 + d_idx, q - oq, r - or_)  # offset key space from 6-cell
+                if wkey8 in seen8:
+                    continue
+                seen8.add(wkey8)
+                dq, dr = _DIR_VECTORS[d_idx]
+                sq, sr = q - oq, r - or_
+                pat_int = 0
+                has_piece = False
+                for j in range(self._eval_length):
+                    cp = board.get((sq + j * dq, sr + j * dr))
+                    if cp == Player.A:
+                        pat_int += cell_a * pow3[j]
+                        has_piece = True
+                    elif cp == Player.B:
+                        pat_int += cell_b * pow3[j]
+                        has_piece = True
+                if has_piece:
+                    self._wp[wkey8] = pat_int
+                    self._eval_score += pv[pat_int]
+
+        # ── Candidate set ──
         self._cand_refcount = {}
         for (q, r) in board:
             for dq, dr in _NEIGHBOR_OFFSETS_2:
@@ -230,16 +271,14 @@ class MinimaxBot(Bot):
         if not self._cand_set:
             return [(0, 0)]
 
-        # Generate and sort initial turn candidates
         maximizing = game.current_player == self._player
-        is_a = game.current_player == Player.A
         turns = self._generate_turns(game)
         if not turns:
             return [(0, 0)]
 
         best_move = list(turns[0])
 
-        # Save full state for rollback on TimeUp
+        # Save state for TimeUp rollback
         saved_board = dict(game.board)
         saved_state = (game.current_player, game.moves_left_in_turn,
                        game.winner, game.game_over)
@@ -247,6 +286,7 @@ class MinimaxBot(Bot):
         saved_hash = self._hash
         saved_eval = self._eval_score
         saved_wc = {k: v[:] for k, v in self._wc.items()}
+        saved_wp = dict(self._wp)
         saved_cand_set = set(self._cand_set)
         saved_cand_rc = dict(self._cand_refcount)
         saved_hot_a = set(self._hot_a)
@@ -258,13 +298,12 @@ class MinimaxBot(Bot):
                 result, scores = self._search_root(game, turns, depth)
                 best_move = list(result)
                 self.last_depth = depth
+                self.last_score = scores.get(result, 0)
                 nodes_this_depth = self._nodes - nodes_before
                 if nodes_this_depth > 1:
                     self.last_ebf = round(nodes_this_depth ** (1.0 / depth), 1)
                 self.last_score = scores.get(result, 0)
-                # Reorder turns by score for next iteration
                 turns.sort(key=lambda t: scores.get(t, 0), reverse=maximizing)
-                # Stop if forced win/loss found
                 if abs(scores.get(result, 0)) >= _WIN_SCORE:
                     break
             except TimeUp:
@@ -275,6 +314,7 @@ class MinimaxBot(Bot):
                 self._hash = saved_hash
                 self._eval_score = saved_eval
                 self._wc = saved_wc
+                self._wp = saved_wp
                 self._cand_set = saved_cand_set
                 self._cand_refcount = saved_cand_rc
                 self._hot_a = saved_hot_a
@@ -289,9 +329,10 @@ class MinimaxBot(Bot):
             raise TimeUp
 
     def _make(self, game, q, r):
-        """Make move and update Zobrist hash, incremental eval, and candidates."""
+        """Make move: update Zobrist, 6-cell win windows, 8-cell eval windows, candidates."""
         player = game.current_player
-        # Update Zobrist hash (lazy generation)
+
+        # Zobrist hash
         zkey = (q, r, player)
         v = _zobrist.get(zkey)
         if v is None:
@@ -299,42 +340,51 @@ class MinimaxBot(Bot):
             _zobrist[zkey] = v
         self._hash ^= v
 
-        # Update incremental eval via window counts + detect win
-        st = self._score_table
+        # Cell value for pattern encoding
+        cell_val = self._cell_a if player == Player.A else self._cell_b
+
+        # ── 6-cell windows: update counts for win detection ──
         wc = self._wc
         won = False
         if player == Player.A:
             hot_a = self._hot_a
-            for d_idx, oq, or_ in _WINDOW_OFFSETS:
+            for d_idx, oq, or_ in _WIN_OFFSETS:
                 wkey = (d_idx, q - oq, r - or_)
                 counts = wc.get(wkey)
                 if counts is None:
                     counts = [0, 0]
                     wc[wkey] = counts
-                a, b = counts[0], counts[1]
-                self._eval_score += st[a + 1][b] - st[a][b]
-                counts[0] = a + 1
-                if a + 1 >= 4:
+                counts[0] += 1
+                if counts[0] >= 4:
                     hot_a.add(wkey)
-                if a + 1 == _WIN_LENGTH and b == 0:
+                if counts[0] == _WIN_LENGTH and counts[1] == 0:
                     won = True
         else:
             hot_b = self._hot_b
-            for d_idx, oq, or_ in _WINDOW_OFFSETS:
+            for d_idx, oq, or_ in _WIN_OFFSETS:
                 wkey = (d_idx, q - oq, r - or_)
                 counts = wc.get(wkey)
                 if counts is None:
                     counts = [0, 0]
                     wc[wkey] = counts
-                a, b = counts[0], counts[1]
-                self._eval_score += st[a][b + 1] - st[a][b]
-                counts[1] = b + 1
-                if b + 1 >= 4:
+                counts[1] += 1
+                if counts[1] >= 4:
                     hot_b.add(wkey)
-                if b + 1 == _WIN_LENGTH and a == 0:
+                if counts[1] == _WIN_LENGTH and counts[0] == 0:
                     won = True
 
-        # Update candidates: (q, r) is now occupied
+        # ── 8-cell windows: update pattern_ints for eval ──
+        pv = self._pv
+        wp = self._wp
+        pow3 = self._pow3
+        for d_idx, k, oq, or_ in self._eval_offsets:
+            wkey8 = (3 + d_idx, q - oq, r - or_)
+            old_pi = wp.get(wkey8, 0)
+            new_pi = old_pi + cell_val * pow3[k]
+            self._eval_score += pv[new_pi] - pv[old_pi]
+            wp[wkey8] = new_pi
+
+        # ── Candidates ──
         self._cand_set.discard((q, r))
         rc = self._cand_refcount
         self._rc_stack.append(rc.pop((q, r), 0))
@@ -345,7 +395,7 @@ class MinimaxBot(Bot):
             if nb not in board:
                 self._cand_set.add(nb)
 
-        # Place stone and manage game state (bypasses game.make_move/_check_win)
+        # Place stone
         game.board[(q, r)] = player
         game.move_count += 1
         if won:
@@ -354,47 +404,54 @@ class MinimaxBot(Bot):
         else:
             game.moves_left_in_turn -= 1
             if game.moves_left_in_turn <= 0:
-                if player == Player.A:
-                    game.current_player = Player.B
-                else:
-                    game.current_player = Player.A
+                game.current_player = Player.B if player == Player.A else Player.A
                 game.moves_left_in_turn = 2
 
     def _undo(self, game, q, r, state, player):
-        """Undo move and restore Zobrist hash, incremental eval, and candidates."""
+        """Undo move: restore Zobrist, 6-cell windows, 8-cell eval windows, candidates."""
         del game.board[(q, r)]
         game.move_count -= 1
         game.current_player, game.moves_left_in_turn, game.winner, game.game_over = state
 
-        # Undo Zobrist hash
-        zkey = (q, r, player)
-        self._hash ^= _zobrist[zkey]  # guaranteed to exist from _make
+        # Zobrist
+        self._hash ^= _zobrist[(q, r, player)]
 
-        # Undo incremental eval via window counts
-        st = self._score_table
+        cell_val = self._cell_a if player == Player.A else self._cell_b
+
+        # ── 6-cell windows ──
         wc = self._wc
         if player == Player.A:
             hot_a = self._hot_a
-            for d_idx, oq, or_ in _WINDOW_OFFSETS:
+            for d_idx, oq, or_ in _WIN_OFFSETS:
                 wkey = (d_idx, q - oq, r - or_)
                 counts = wc[wkey]
-                a, b = counts[0], counts[1]
-                self._eval_score += st[a - 1][b] - st[a][b]
-                counts[0] = a - 1
-                if a - 1 < 4:
+                counts[0] -= 1
+                if counts[0] < 4:
                     hot_a.discard(wkey)
         else:
             hot_b = self._hot_b
-            for d_idx, oq, or_ in _WINDOW_OFFSETS:
+            for d_idx, oq, or_ in _WIN_OFFSETS:
                 wkey = (d_idx, q - oq, r - or_)
                 counts = wc[wkey]
-                a, b = counts[0], counts[1]
-                self._eval_score += st[a][b - 1] - st[a][b]
-                counts[1] = b - 1
-                if b - 1 < 4:
+                counts[1] -= 1
+                if counts[1] < 4:
                     hot_b.discard(wkey)
 
-        # Undo candidates: (q, r) is empty again
+        # ── 8-cell windows ──
+        pv = self._pv
+        wp = self._wp
+        pow3 = self._pow3
+        for d_idx, k, oq, or_ in self._eval_offsets:
+            wkey8 = (3 + d_idx, q - oq, r - or_)
+            old_pi = wp[wkey8]
+            new_pi = old_pi - cell_val * pow3[k]
+            self._eval_score += pv[new_pi] - pv[old_pi]
+            if new_pi == 0:
+                del wp[wkey8]
+            else:
+                wp[wkey8] = new_pi
+
+        # ── Candidates ──
         rc = self._cand_refcount
         for dq, dr in _NEIGHBOR_OFFSETS_2:
             nb = (q + dq, r + dr)
@@ -404,7 +461,6 @@ class MinimaxBot(Bot):
                 self._cand_set.discard(nb)
             else:
                 rc[nb] = c
-        # Restore (q, r) candidate with saved refcount (avoids second 18-neighbor loop)
         saved_rc = self._rc_stack.pop()
         if saved_rc > 0:
             rc[(q, r)] = saved_rc
@@ -414,35 +470,22 @@ class MinimaxBot(Bot):
         return (self._hash, game.current_player, game.moves_left_in_turn)
 
     def _move_delta(self, q, r, is_a):
-        """Eval delta from placing at (q,r) — read-only, no state mutation."""
-        wc = self._wc
-        st = self._score_table
-        delta = 0
-        if is_a:
-            new_w = st[1][0]
-            for d_idx, oq, or_ in _WINDOW_OFFSETS:
-                counts = wc.get((d_idx, q - oq, r - or_))
-                if counts is not None:
-                    delta += st[counts[0] + 1][counts[1]] - st[counts[0]][counts[1]]
-                else:
-                    delta += new_w
-        else:
-            new_w = st[0][1]
-            for d_idx, oq, or_ in _WINDOW_OFFSETS:
-                counts = wc.get((d_idx, q - oq, r - or_))
-                if counts is not None:
-                    delta += st[counts[0]][counts[1] + 1] - st[counts[0]][counts[1]]
-                else:
-                    delta += new_w
+        """Eval delta from placing at (q,r) using N-cell patterns — read-only."""
+        cell_val = self._cell_a if is_a else self._cell_b
+        pv = self._pv
+        wp = self._wp
+        pow3 = self._pow3
+        delta = 0.0
+        for d_idx, k, oq, or_ in self._eval_offsets:
+            wkey8 = (3 + d_idx, q - oq, r - or_)
+            old_pi = wp.get(wkey8, 0)
+            new_pi = old_pi + cell_val * pow3[k]
+            delta += pv[new_pi] - pv[old_pi]
         return delta
 
-    def _find_instant_win(self, game, player):
-        """Find a winning turn if player can complete a window in one turn (2 stones).
+    # ── Win/threat detection (6-cell windows, identical to ai.py) ──
 
-        Checks for windows with 4 or 5 stones and 0 opponent — filling
-        the remaining 2 or 1 empties in a single turn wins immediately.
-        Returns a (cell1, cell2) turn tuple, or None.
-        """
+    def _find_instant_win(self, game, player):
         p_idx = 0 if player == Player.A else 1
         o_idx = 1 - p_idx
         hot = self._hot_a if player == Player.A else self._hot_b
@@ -451,7 +494,6 @@ class MinimaxBot(Bot):
         for wkey in hot:
             counts = wc[wkey]
             if counts[p_idx] >= _WIN_LENGTH - 2 and counts[o_idx] == 0:
-                empties = counts[p_idx] == _WIN_LENGTH - 2  # expect 2 empties
                 d_idx, sq, sr = wkey
                 dq, dr = _DIR_VECTORS[d_idx]
                 cells = []
@@ -460,16 +502,13 @@ class MinimaxBot(Bot):
                     if cell not in board:
                         cells.append(cell)
                 if len(cells) == 1:
-                    # 5 of 6: pair with any candidate
                     other = next((c for c in self._cand_set if c != cells[0]), cells[0])
                     return (min(cells[0], other), max(cells[0], other))
                 elif len(cells) == 2:
-                    # 4 of 6: play both empties
                     return (min(cells[0], cells[1]), max(cells[0], cells[1]))
         return None
 
     def _find_threat_cells(self, game, player):
-        """Return set of empty cells in windows where player has 4 and opponent has 0."""
         threat_cells = set()
         p_idx = 0 if player == Player.A else 1
         o_idx = 1 - p_idx
@@ -523,14 +562,14 @@ class MinimaxBot(Bot):
         return [t for t in turns
                 if all(t[0] in w or t[1] in w for w in must_hit)]
 
+    # ── Turn management (identical to ai.py) ──
+
     def _make_turn(self, game, turn):
-        """Apply a full turn (2 stones). Returns undo info list."""
         m1, m2 = turn
         p1 = game.current_player
         s1 = (p1, game.moves_left_in_turn, game.winner, game.game_over)
         self._make(game, m1[0], m1[1])
         if game.game_over:
-            # First stone won — no second stone
             return [(m1, s1, p1)]
         p2 = game.current_player
         s2 = (p2, game.moves_left_in_turn, game.winner, game.game_over)
@@ -538,13 +577,10 @@ class MinimaxBot(Bot):
         return [(m1, s1, p1), (m2, s2, p2)]
 
     def _undo_turn(self, game, undo_info):
-        """Undo a full turn in reverse order."""
         for cell, state, player in reversed(undo_info):
             self._undo(game, cell[0], cell[1], state, player)
 
     def _generate_turns(self, game):
-        """Generate C(N,2) turn pairs, ordered by sorting singles first."""
-        # Instant win: current player can complete a window in one turn
         win_turn = self._find_instant_win(game, game.current_player)
         if win_turn:
             return [win_turn]
@@ -559,7 +595,6 @@ class MinimaxBot(Bot):
         move_delta = self._move_delta
         maximizing = game.current_player == self._player
 
-        # Sort singles by delta — pairs from combinations inherit good ordering
         candidates.sort(key=lambda c: move_delta(c[0], c[1], is_a), reverse=maximizing)
         candidates = candidates[:_ROOT_CANDIDATE_CAP]
 
@@ -702,8 +737,9 @@ class MinimaxBot(Bot):
 
         return value
 
+    # ── Search ──
+
     def _search_root(self, game, turns, depth):
-        """Search all root turns, narrowing alpha-beta window as we go."""
         maximizing = game.current_player == self._player
         best_turn = turns[0]
         alpha = -math.inf
@@ -741,7 +777,6 @@ class MinimaxBot(Bot):
                 return -_WIN_SCORE
             return 0
 
-        # TT lookup
         tt_key = self._tt_key(game)
         tt_entry = self._tt.get(tt_key)
         tt_move = None
@@ -762,7 +797,6 @@ class MinimaxBot(Bot):
             self._tt[tt_key] = (0, score, _EXACT, None)
             return score
 
-        # Instant win: skip full turn generation
         win_turn = self._find_instant_win(game, game.current_player)
         if win_turn:
             undo_info = self._make_turn(game, win_turn)
@@ -771,21 +805,12 @@ class MinimaxBot(Bot):
             self._tt[tt_key] = (depth, score, _EXACT, win_turn)
             return score
 
-        # Instant loss: opponent wins next turn and we can't block all threats
         opponent = Player.B if game.current_player == Player.A else Player.A
         opp_win = self._find_instant_win(game, opponent)
         if opp_win:
-            # Opponent has at least one winning window — check if we can block.
-            # Collect all opponent threat windows (4+ of 6) to find distinct
-            # windows that each need at least one cell blocked.
             opp_threats = self._find_threat_cells(game, opponent)
-            # We get 2 moves — count how many independent windows need blocking.
-            # Each window with 4-of-6 needs one of its 2 empties blocked;
-            # each window with 5-of-6 needs its 1 empty blocked.
-            # If the threat cells can't all be covered by 2 moves, we lose.
             p_idx = 0 if opponent == Player.A else 1
             o_idx = 1 - p_idx
-            # Collect sets of empties per threat window — must hit at least one per window
             must_hit = []
             board = game.board
             hot = self._hot_a if opponent == Player.A else self._hot_b
@@ -802,7 +827,6 @@ class MinimaxBot(Bot):
                     )
                     must_hit.append(empties)
             if len(must_hit) > 1:
-                # Check if any pair of cells hits all windows
                 can_block = False
                 all_cells = set()
                 for s in must_hit:
@@ -823,15 +847,12 @@ class MinimaxBot(Bot):
         orig_beta = beta
         maximizing = game.current_player == self._player
 
-        # Generate and order turns
         candidates = list(self._cand_set)
         if len(candidates) < 2:
-            # Edge case: fewer than 2 candidates
             if not candidates:
                 score = self._eval_score
                 self._tt[tt_key] = (depth, score, _EXACT, None)
                 return score
-            # Single candidate — make it as a lone move (shouldn't normally happen)
             c = candidates[0]
             turns = [(c, c)]
         else:
@@ -839,7 +860,6 @@ class MinimaxBot(Bot):
             history = self._history
             move_delta = self._move_delta
 
-            # Sort singles by history + delta, then pairs inherit good ordering
             delta_sign = _DELTA_WEIGHT if maximizing else -_DELTA_WEIGHT
             candidates.sort(
                 key=lambda c: history.get(c, 0) + move_delta(c[0], c[1], is_a) * delta_sign,
@@ -849,7 +869,11 @@ class MinimaxBot(Bot):
             turns = list(combinations(candidates, 2))
             turns = self._filter_turns_by_threats(game, turns)
 
-        # TT move to front
+        if not turns:
+            score = self._eval_score
+            self._tt[tt_key] = (depth, score, _EXACT, None)
+            return score
+
         if tt_move is not None:
             try:
                 idx = turns.index(tt_move)
