@@ -21,10 +21,13 @@ import numpy as np
 from scipy import sparse
 from tqdm import tqdm
 
+_PLAYER_MAP = None  # set lazily for parquet loading
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from game import Player, HEX_DIRECTIONS
-from ai import LINE_SCORES
+# Hand-tuned line scores by piece count (index = num pieces in a row)
+LINE_SCORES = [0, 0, 8, 1200, 3000, 50000, 100000]
 from learned_eval.pattern_table import build_arrays
 
 DIR_VECTORS = list(HEX_DIRECTIONS)
@@ -32,6 +35,7 @@ _WIN_LENGTH = 6
 
 # These globals are set by main() based on --window-length
 WINDOW_LENGTH = 6
+ENFORCE_PIECE_SWAP = True
 CANON_PATTERNS = None
 CANON_INDEX = None
 CANON_SIGN = None
@@ -120,12 +124,12 @@ def extract_features(board, current_player):
     return features
 
 
-def _init_worker(wlen):
+def _init_worker(wlen, enforce_piece_swap=True):
     """Initialize pattern table globals in each worker process."""
     global WINDOW_LENGTH, CANON_PATTERNS, CANON_INDEX, CANON_SIGN, NUM_CANON
     if CANON_INDEX is None:
         WINDOW_LENGTH = wlen
-        CANON_PATTERNS, CANON_INDEX, CANON_SIGN, NUM_CANON, _ = build_arrays(wlen)
+        CANON_PATTERNS, CANON_INDEX, CANON_SIGN, NUM_CANON, _ = build_arrays(wlen, enforce_piece_swap=enforce_piece_swap)
 
 
 def _extract_one(args):
@@ -160,7 +164,7 @@ def build_dataset(positions, target_idx=2, win_idx=None, binary_targets=False,
     win_scores = []
     board_sizes = []
 
-    with Pool(workers, initializer=_init_worker, initargs=(WINDOW_LENGTH,)) as pool:
+    with Pool(workers, initializer=_init_worker, initargs=(WINDOW_LENGTH, ENFORCE_PIECE_SWAP)) as pool:
         for result in tqdm(pool.imap(_extract_one, args, chunksize=256),
                            total=n, desc="Extracting features", unit="pos"):
             if result is None:
@@ -466,6 +470,50 @@ def split_by_game(positions, val_fraction=0.2, seed=42):
     return train_pos, val_pos
 
 
+def _parquet_row_to_tuple(args):
+    """Convert a parquet row (as dict) to a 5-tuple for training."""
+    board_json, cp_int, eval_score, win_score, game_id = args
+    board = {tuple(map(int, k.split(','))): _PLAYER_MAP[v]
+             for k, v in json.loads(board_json).items()}
+    return (board, _PLAYER_MAP[cp_int], eval_score, win_score, game_id)
+
+
+def _init_parquet_worker():
+    """Initialize Player map in worker processes."""
+    global _PLAYER_MAP
+    if _PLAYER_MAP is None:
+        from game import Player
+        _PLAYER_MAP = {1: Player.A, 2: Player.B}
+
+
+def load_parquet(path):
+    """Load a parquet file and convert to list of 5-tuples.
+
+    Uses multiprocessing for fast conversion of board JSON strings.
+    Returns list of (board_dict, Player, eval_score, win_score, game_id).
+    """
+    import pandas as pd
+    from multiprocessing import Pool
+
+    global _PLAYER_MAP
+    _PLAYER_MAP = {1: Player.A, 2: Player.B}
+
+    df = pd.read_parquet(path)
+    print(f"Loaded {len(df)} rows from {path}")
+
+    args = list(zip(df['board'], df['current_player'], df['eval_score'],
+                     df['win_score'], df['game_id']))
+
+    workers = os.cpu_count() or 1
+    positions = []
+    with Pool(workers, initializer=_init_parquet_worker) as pool:
+        for result in tqdm(pool.imap(_parquet_row_to_tuple, args, chunksize=1024),
+                           total=len(args), desc="Converting parquet", unit="pos"):
+            positions.append(result)
+
+    return positions
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -501,16 +549,20 @@ def main():
     args = parser.parse_args()
 
     # Initialize pattern tables for the requested window length
-    global WINDOW_LENGTH, CANON_PATTERNS, CANON_INDEX, CANON_SIGN, NUM_CANON
+    global WINDOW_LENGTH, ENFORCE_PIECE_SWAP, CANON_PATTERNS, CANON_INDEX, CANON_SIGN, NUM_CANON
     WINDOW_LENGTH = args.window_length
     enforce_ps = not args.no_piece_swap
+    ENFORCE_PIECE_SWAP = enforce_ps
     CANON_PATTERNS, CANON_INDEX, CANON_SIGN, NUM_CANON, _ = build_arrays(WINDOW_LENGTH, enforce_piece_swap=enforce_ps)
     sym_label = "with" if enforce_ps else "without"
     print(f"Window length {WINDOW_LENGTH}: {NUM_CANON} canonical patterns ({sym_label} piece-swap symmetry)")
 
-    with open(args.input, "rb") as f:
-        positions = pickle.load(f)
-    print(f"Loaded {len(positions)} positions from {args.input}")
+    if args.input.endswith(".parquet"):
+        positions = load_parquet(args.input)
+    else:
+        with open(args.input, "rb") as f:
+            positions = pickle.load(f)
+        print(f"Loaded {len(positions)} positions from {args.input}")
 
     # Determine target index based on tuple length
     tlen = len(positions[0])

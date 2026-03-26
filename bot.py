@@ -17,6 +17,10 @@ _D2_OFFSETS = tuple(
 )
 
 
+class BoardTooLargeError(Exception):
+    """Raised when the board exceeds a bot's maximum representable size."""
+
+
 class Bot(ABC):
     """Abstract bot. Subclasses must implement get_move and respect time_limit."""
 

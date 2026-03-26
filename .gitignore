@@ -1,5 +1,7 @@
 __pycache__/
 *.so
+*.pyd
+*.parquet
 build/
 .DS_Store
 *.pkl
@@ -7,3 +9,9 @@ build/
 .venv/
 cpp/hex_engine.js
 cpp/hex_engine.wasm
+.claude/
+learned_eval/resnet_results/
+learned_eval/data/*_cache/
+wandb/
+learned_eval/data/selfplay/
+learned_eval/mcts_results/

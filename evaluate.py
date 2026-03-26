@@ -14,7 +14,7 @@ from collections import defaultdict
 from multiprocessing import Pool
 from tqdm import tqdm
 from game import HexGame, Player
-from bot import RandomBot
+from bot import BoardTooLargeError, RandomBot
 import importlib
 
 
@@ -211,6 +211,8 @@ def _play_one(args):
         winner = Player.NONE
         d_a, d_b = defaultdict(int), defaultdict(int)
         t_a, t_b = (0.0, 0), (0.0, 0)
+    except BoardTooLargeError:
+        return None  # signal to skip this game
 
     move_count = t_a[1] + t_b[1]  # total moves in the game
 
@@ -252,6 +254,7 @@ def evaluate(bot_a, bot_b, num_games=100, win_length=6, time_limit=0.1,
     bot_a_time = [0.0, 0]  # [total_secs, num_moves]
     bot_b_time = [0.0, 0]
     game_lengths = []  # total moves per game
+    board_too_large = 0
 
     workers = os.cpu_count() or 1
     if positions is not None:
@@ -271,6 +274,9 @@ def evaluate(bot_a, bot_b, num_games=100, win_length=6, time_limit=0.1,
         if use_tqdm:
             results_iter = tqdm(results_iter, total=num_games, desc="Games", unit="game")
         for result in results_iter:
+            if result is None:
+                board_too_large += 1
+                continue
             winner, swapped, d_a, d_b, v_a, v_b, exceeded, t_a, t_b, move_count = result
 
             if exceeded:
@@ -379,6 +385,11 @@ def evaluate(bot_a, bot_b, num_games=100, win_length=6, time_limit=0.1,
         print()
         print(f"  TIME VIOLATIONS: {na}={bot_a_violations}, {nb}={bot_b_violations}"
               f"  ({aborted_games} games forfeited)")
+
+    if board_too_large:
+        print()
+        print(f"  BOARD TOO LARGE: {board_too_large} games skipped"
+              f" (board exceeded NN grid size)")
 
     print(f"{'='*50}")
 
