@@ -196,10 +196,9 @@ def compute_loss(value_pred, pair_logits, wins, moves,
     pair_target = m1 * N + m2
     policy_loss = F.cross_entropy(flat_logits, pair_target)
 
-    # Entropy regularization — only compute if weight > 0 to avoid NaN poisoning
+    # Entropy regularization
     if entropy_weight > 0:
         probs = F.softmax(flat_logits.float(), dim=-1)
-        # Clamp to avoid log(0) = -inf → 0 * -inf = NaN
         entropy = -(probs * probs.clamp(min=1e-10).log()).sum(dim=-1).mean()
         entropy_loss = -entropy
         total = (value_weight * value_loss + policy_weight * policy_loss
@@ -319,7 +318,7 @@ def train(args):
 
             if use_amp:
                 with torch.amp.autocast("cuda"):
-                    v_pred, pair_logits = model(planes)
+                    v_pred, pair_logits, _, _ = model(planes)
                     loss, v_loss, p_loss, ent = compute_loss(
                         v_pred, pair_logits, wins, moves,
                         args.value_weight, args.policy_weight,
@@ -331,7 +330,7 @@ def train(args):
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                v_pred, pair_logits = model(planes)
+                v_pred, pair_logits, _, _ = model(planes)
                 loss, v_loss, p_loss, ent = compute_loss(
                     v_pred, pair_logits, wins, moves,
                     args.value_weight, args.policy_weight,
@@ -342,27 +341,84 @@ def train(args):
                 optimizer.step()
 
             bs = len(wins)
-            train_v += v_loss.item() * bs
-            train_p += p_loss.item() * bs
+            v_val = v_loss.item()
+            p_val = p_loss.item()
+            ent_val = ent.item()
+            loss_val = loss.item()
+
+            # NaN detection with full diagnostic dump
+            if not (loss_val == loss_val):  # fast NaN check
+                logit_fin = pair_logits[pair_logits.isfinite()]
+                grad_norm = sum(
+                    p.grad.norm().item() for p in model.parameters()
+                    if p.grad is not None
+                )
+                # Which individual losses are NaN?
+                nan_parts = []
+                if not (v_val == v_val): nan_parts.append("value")
+                if not (p_val == p_val): nan_parts.append("policy")
+                if not (ent_val == ent_val): nan_parts.append("entropy")
+                print(
+                    f"\n  NaN at step {global_step} | "
+                    f"nan_in: {','.join(nan_parts) or 'total_only'} | "
+                    f"v={v_val:.4f} p={p_val:.4f} H={ent_val:.4f} | "
+                    f"logits: [{pair_logits.min().item():.1f}, "
+                    f"{pair_logits.max().item():.1f}] "
+                    f"inf={pair_logits.isinf().sum().item()} "
+                    f"nan={pair_logits.isnan().sum().item()} | "
+                    f"finite_logits: [{logit_fin.min().item():.1f}, "
+                    f"{logit_fin.max().item():.1f}] "
+                    f"mean={logit_fin.mean().item():.2f} | "
+                    f"value_pred: [{v_pred.min().item():.3f}, "
+                    f"{v_pred.max().item():.3f}] | "
+                    f"grad_norm={grad_norm:.1f} | "
+                    f"scaler={scaler.get_scale():.0f}" if scaler else ""
+                )
+                continue  # skip accumulation to avoid poisoning averages
+
+            train_v += v_val * bs
+            train_p += p_val * bs
             n_seen += bs
             global_step += 1
 
-            if global_step % 50 == 0:
+            # Periodic health check — track drift before it becomes NaN
+            if global_step % 200 == 0:
+                logit_abs_max = pair_logits.detach().abs().max().item()
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), float("inf")
+                ).item()
+                qk_norms = {}
+                for name, param in model.named_parameters():
+                    if "pair_head" in name and "proj" in name:
+                        qk_norms[name.split(".")[-1]] = (
+                            f"{param.data.norm().item():.2f}"
+                        )
                 pbar.set_postfix(
                     v=f"{train_v/n_seen:.4f}",
                     p=f"{train_p/n_seen:.4f}",
-                    H=f"{ent.item():.2f}",
+                    H=f"{ent_val:.2f}",
+                    logit_max=f"{logit_abs_max:.1f}",
+                    gnorm=f"{grad_norm:.1f}",
+                    **qk_norms,
+                )
+            elif global_step % 50 == 0:
+                pbar.set_postfix(
+                    v=f"{train_v/n_seen:.4f}",
+                    p=f"{train_p/n_seen:.4f}",
+                    H=f"{ent_val:.2f}",
                 )
 
             scheduler.step()
 
             if use_wandb and global_step % log_every == 0:
+                logit_abs_max = pair_logits.detach().abs().max().item()
                 wandb.log({
                     "step": global_step,
-                    "train/value_loss_step": v_loss.item(),
-                    "train/policy_loss_step": p_loss.item(),
-                    "train/total_loss_step": loss.item(),
-                    "train/entropy": ent.item(),
+                    "train/value_loss_step": v_val,
+                    "train/policy_loss_step": p_val,
+                    "train/total_loss_step": loss_val,
+                    "train/entropy": ent_val,
+                    "train/logit_abs_max": logit_abs_max,
                     "lr": optimizer.param_groups[0]["lr"],
                 }, step=global_step)
 
@@ -380,7 +436,7 @@ def train(args):
                 moves = moves.to(device, non_blocking=True)
                 wins = wins.to(device, non_blocking=True)
 
-                v_pred, pair_logits = model(planes)
+                v_pred, pair_logits, _, _ = model(planes)
                 _, vl, pl, _ = compute_loss(
                     v_pred, pair_logits, wins, moves,
                     args.value_weight, args.policy_weight,

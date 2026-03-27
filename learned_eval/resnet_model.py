@@ -17,15 +17,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-BOARD_SIZE = 19
+BOARD_SIZE = 25
 
 
 class ResBlock(nn.Module):
     def __init__(self, channels, gn_groups=8):
         super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1,
+                               padding_mode='circular', bias=False)
         self.gn1 = nn.GroupNorm(gn_groups, channels)
-        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
+        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1,
+                               padding_mode='circular', bias=False)
         self.gn2 = nn.GroupNorm(gn_groups, channels)
 
     def forward(self, x):
@@ -51,11 +53,12 @@ class PairPolicyHead(nn.Module):
         B, C, H, W = trunk_features.shape
         N = H * W
 
-        Q = self.q_proj(trunk_features).flatten(2)  # [B, d, N]
-        K = self.k_proj(trunk_features).flatten(2)  # [B, d, N]
+        Q = self.q_proj(trunk_features).flatten(2).float()  # [B, d, N]
+        K = self.k_proj(trunk_features).flatten(2).float()  # [B, d, N]
 
         A = torch.bmm(Q.transpose(1, 2), K) * self.scale  # [B, N, N]
         A = (A + A.transpose(1, 2)) / 2  # symmetrize
+        A = A.clamp(-100, 100)  # prevent extreme logits
 
         # Mask diagonal (can't place both stones on same cell)
         diag = torch.eye(N, device=A.device, dtype=torch.bool).unsqueeze(0)
@@ -72,12 +75,13 @@ class PairPolicyHead(nn.Module):
 
 class HexResNet(nn.Module):
     def __init__(self, in_channels=2, num_blocks=10, num_filters=128,
-                 gn_groups=8, v_channels=32, pair_head_dim=64):
+                 gn_groups=8, v_channels=32, pair_head_dim=64,
+                 chain_channels=32):
         super().__init__()
 
         # Stem
         self.stem_conv = nn.Conv2d(in_channels, num_filters, 3, padding=1,
-                                   bias=False)
+                                   padding_mode='circular', bias=False)
         self.stem_gn = nn.GroupNorm(gn_groups, num_filters)
 
         # Residual trunk
@@ -90,6 +94,15 @@ class HexResNet(nn.Module):
         self.v_gn = nn.GroupNorm(gn_groups, v_channels)
         self.v_fc1 = nn.Linear(v_channels * 2, 256)  # mean + max = 2x channels
         self.v_fc2 = nn.Linear(256, 1)
+
+        # Moves-left head: same pooled vector as value → FC → ReLU → FC
+        self.ml_fc1 = nn.Linear(v_channels * 2, 256)
+        self.ml_fc2 = nn.Linear(256, 1)
+
+        # Chain head: per-cell longest unblocked chain for each player
+        # trunk → 1x1 conv → ReLU → 1x1 conv → 2 channels
+        self.chain_conv1 = nn.Conv2d(num_filters, chain_channels, 1)
+        self.chain_conv2 = nn.Conv2d(chain_channels, 2, 1)
 
         # Pair policy head
         self.pair_head = PairPolicyHead(num_filters, pair_head_dim)
@@ -104,26 +117,35 @@ class HexResNet(nn.Module):
         Returns:
             value: [B] scalar in [-1, 1]
             pair_logits: [B, N, N] raw pair logits (diagonal=-inf, padding=-inf)
+            moves_left: [B] predicted remaining moves (>= 0)
+            chain: [B, 2, H, W] per-cell longest unblocked chain length
         """
         s = F.relu(self.stem_gn(self.stem_conv(x)))
         t = self.blocks(s)
 
-        # Value head: mean + max pooling for discriminative features
-        v = F.relu(self.v_gn(self.v_conv(t)))  # [B, v_ch, H, W]
+        # Pooled features (shared by value and moves-left heads)
+        v_feat = F.relu(self.v_gn(self.v_conv(t)))  # [B, v_ch, H, W]
         if mask is not None:
-            v_mean = (v * mask).sum(dim=[2, 3]) / mask.sum(dim=[2, 3]).clamp(min=1)
-            v_max = (v + (mask - 1) * 1e9).amax(dim=[2, 3])
+            v_mean = (v_feat * mask).sum(dim=[2, 3]) / mask.sum(dim=[2, 3]).clamp(min=1)
+            v_max = (v_feat + (mask - 1) * 1e9).amax(dim=[2, 3])
         else:
-            v_mean = v.mean(dim=[2, 3])
-            v_max = v.amax(dim=[2, 3])
-        v = torch.cat([v_mean, v_max], dim=-1)  # [B, 2*v_ch]
-        v = F.relu(self.v_fc1(v))
-        v = torch.tanh(self.v_fc2(v)).squeeze(-1)
+            v_mean = v_feat.mean(dim=[2, 3])
+            v_max = v_feat.amax(dim=[2, 3])
+        v_pooled = torch.cat([v_mean, v_max], dim=-1)  # [B, 2*v_ch]
+
+        # Value head
+        value = torch.tanh(self.v_fc2(F.relu(self.v_fc1(v_pooled)))).squeeze(-1)
+
+        # Moves-left head (from same pooled vector)
+        moves_left = F.relu(self.ml_fc2(F.relu(self.ml_fc1(v_pooled)))).squeeze(-1)
 
         # Pair policy head
         pair_logits = self.pair_head(t, mask)
 
-        return v, pair_logits
+        # Chain head: per-cell longest unblocked chain for current/opponent
+        chain = self.chain_conv2(F.relu(self.chain_conv1(t)))  # [B, 2, H, W]
+
+        return value, pair_logits, moves_left, chain
 
     @staticmethod
     def marginalize(pair_logits):
@@ -177,6 +199,21 @@ def board_to_planes(board_dict, current_player, pad_to=None):
     return planes, off_q, off_r, h, w
 
 
+def board_to_planes_torus(board_dict, current_player):
+    """Convert torus-coordinate board dict to fixed [2, BOARD_SIZE, BOARD_SIZE] tensor.
+
+    board_dict: {(q, r): Player} where 0 <= q, r < BOARD_SIZE.
+    Returns: planes tensor [2, BOARD_SIZE, BOARD_SIZE].
+    """
+    planes = torch.zeros(2, BOARD_SIZE, BOARD_SIZE)
+    for (q, r), player in board_dict.items():
+        if player == current_player:
+            planes[0, q, r] = 1.0
+        else:
+            planes[1, q, r] = 1.0
+    return planes
+
+
 def parse_board_json(board_json):
     """Parse board JSON string to {(q,r): player_int} dict."""
     return {
@@ -201,14 +238,17 @@ if __name__ == "__main__":
     for size in [11, 19, 25]:
         x = torch.randn(4, 2, size, size)
         mask = torch.ones(4, 1, size, size)
-        v, pair = model(x, mask)
+        v, pair, ml, chain = model(x, mask)
         N = size * size
         single = HexResNet.marginalize(pair)
         print(f"  {size}x{size}: value={v.shape}, pair={pair.shape}, "
-              f"single={single.shape}, "
+              f"moves_left={ml.shape}, chain={chain.shape}, "
               f"v=[{v.min().item():.3f}, {v.max().item():.3f}]")
 
         # Verify symmetry and diagonal masking
         assert torch.allclose(pair, pair.transpose(1, 2)), "Not symmetric!"
         assert (pair[:, range(N), range(N)] == float("-inf")).all(), "Diagonal not masked!"
+        assert ml.shape == (4,), f"moves_left shape wrong: {ml.shape}"
+        assert chain.shape == (4, 2, size, size), f"chain shape wrong: {chain.shape}"
+        assert (ml >= 0).all(), "moves_left should be non-negative"
     print("All checks passed.")

@@ -1,70 +1,149 @@
-"""MCTS engine for HexTicTacToe with two-level tree (stone_1 → stone_2 → leaf).
+"""MCTS engine for HexTicTacToe with multi-ply tree search.
 
-Single NN forward pass at root caches the full N×N pair attention matrix.
-Level-1 priors come from marginalizing over columns; level-2 priors come from
-the conditional row pair_probs[stone1_idx, :].
+Root positions use a two-level tree (stone_1 -> stone_2) with full conditional
+priors from the NN's pair attention matrix and ALL empty cells as candidates.
+Non-root positions use flat top-K pair selection for efficiency.  The tree
+grows deeper as simulations accumulate: after EXPAND_VISITS visits to a pair,
+a child PosNode is created for the resulting position.
 
-Designed for batched self-play: select_leaf returns board state for NN eval,
-expand_and_backprop integrates the result.
+Children are stored as parallel Python lists for fast PUCT selection.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from bot import _D2_OFFSETS
-from game import HexGame, Player
+from game import Player
+from learned_eval.resnet_model import BOARD_SIZE
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+PUCT_C = 5.0            # standard gomoku/Connect-6 value
+EXPAND_VISITS = 1       # expand on first visit (standard AlphaZero)
+MAX_DEPTH = 50          # safety limit on pair-move depth
+NON_ROOT_TOP_K = 50     # candidate pairs for non-root flat selection
+DIRICHLET_ALPHA = 0.02  # ~10/N_legal, Connect-6 convention for ~600 candidates
+DIRICHLET_FRAC = 0.25   # standard AlphaZero/gomoku noise weight
+N_CELLS = BOARD_SIZE * BOARD_SIZE
+_ALL_CELLS = frozenset((q, r) for q in range(BOARD_SIZE) for r in range(BOARD_SIZE))
+
 
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
-PUCT_C = 2.5
-TOP_K = 50
-
-
-@dataclass
 class MCTSNode:
-    prior: float = 0.0
-    visit_count: int = 0
-    value_sum: float = 0.0
-    children: dict[int, "MCTSNode"] = field(default_factory=dict)
-    is_terminal: bool = False
-    terminal_value: float = 0.0
+    """MCTS node with list-based children for fast PUCT.
+
+    Children stored as parallel Python lists for minimal per-element access
+    overhead.  At root PosNodes, level2 dict maps stone_1 action indices to
+    child MCTSNode objects for stone_2 selection.  At non-root PosNodes,
+    actions are encoded pair indices (s1 * N_CELLS + s2).
+    """
+    __slots__ = ('visit_count', 'n', 'actions', 'priors', 'visits', 'values',
+                 'terminals', 'term_vals', 'action_map', 'level2',
+                 '_has_terminal')
+
+    def __init__(self):
+        self.visit_count: int = 0
+        self.n: int = 0
+        self.actions: list | None = None     # [K] int
+        self.priors: list | None = None      # [K] float
+        self.visits: list | None = None      # [K] int
+        self.values: list | None = None      # [K] float
+        self.terminals: list | None = None   # [K] bool
+        self.term_vals: list | None = None   # [K] float
+        self.action_map: dict | None = None  # action_idx -> local_idx
+        self.level2: dict | None = None      # action_idx -> MCTSNode
+        self._has_terminal: bool = False
+
+
+class PosNode:
+    """Expanded position in the multi-ply MCTS tree.
+
+    Root nodes (is_root=True) use two-level decomposition:
+      move_node selects stone_1, move_node.level2[s1] selects stone_2.
+      children maps (s1_idx, s2_idx) -> child PosNode.
+
+    Non-root nodes (is_root=False) use flat pair selection:
+      move_node selects an encoded pair (s1*N_CELLS+s2).
+      children maps pair_action_idx -> child PosNode.
+    """
+    __slots__ = ('move_node', 'children', '_marginal', 'player', 'value',
+                 'is_root')
+
+    def __init__(self):
+        self.move_node: MCTSNode = MCTSNode()
+        self.children: dict | None = None     # pair_key -> PosNode
+        self._marginal: torch.Tensor | None = None  # [N_CELLS]
+        self.player: Player | None = None
+        self.value: float = 0.0
+        self.is_root: bool = False
+
+
+def _init_node_children(node: MCTSNode, actions_priors: list[tuple[int, float]]):
+    """Initialize list-based children on a node from (action, prior) pairs."""
+    n = len(actions_priors)
+    node.n = n
+    node.actions = [a for a, _ in actions_priors]
+    priors = [p for _, p in actions_priors]
+    total = sum(priors)
+    if total > 0:
+        node.priors = [p / total for p in priors]
+    else:
+        u = 1.0 / n
+        node.priors = [u] * n
+    node.visits = [0] * n
+    node.values = [0.0] * n
+    node.terminals = [False] * n
+    node.term_vals = [0.0] * n
+    node.action_map = {a: i for i, a in enumerate(node.actions)}
 
 
 @dataclass
 class LeafInfo:
     """Info returned by select_leaf for batched NN eval."""
-    path: list[tuple[MCTSNode, int]]  # [(parent_node, action_idx), ...]
-    board_dict: dict | None = None  # board state at leaf (for NN eval)
+    path: list[tuple[MCTSNode, int]]  # [(node, action_idx), ...]
+    pair_depths: list[int] = field(default_factory=list)  # pair depth per entry
     current_player: Player | None = None
     is_terminal: bool = False
     terminal_value: float = 0.0
-    # Delta from root position: cells placed as (grid_row, grid_col, channel)
-    # channel 0 = current player at root, channel 1 = opponent at root
+    # Delta from root position: cells placed as (q, r, channel)
+    # channel 0 = root player's stones, channel 1 = opponent's stones
     deltas: list[tuple[int, int, int]] = field(default_factory=list)
     player_flipped: bool = False  # True if leaf's current_player != root's
+    needs_expansion: bool = False
+    expand_parent: PosNode | None = None
+    expand_pair: object = None  # (s1, s2) tuple for root, int for non-root
 
 
 @dataclass
 class MCTSTree:
-    root: MCTSNode
-    pair_probs: torch.Tensor  # [N, N] softmax of pair logits
-    marginal_probs: torch.Tensor  # [N] marginalized priors
-    root_planes: torch.Tensor | None = None  # [2, h, w] cached root planes
-    root_player: Player | None = None  # current_player at root
-    off_q: int = 0
-    off_r: int = 0
-    h: int = 0
-    w: int = 0
+    root_pos: PosNode
+    pair_probs: torch.Tensor | None = None   # [N, N] for root level-2 expansion
+    root_planes: torch.Tensor | None = None  # [2, BOARD_SIZE, BOARD_SIZE]
+    root_player: Player | None = None
     root_value: float = 0.0
+    root_occupied: frozenset | None = None   # occupied cells at root
+
+
+# ---------------------------------------------------------------------------
+# Coordinate helpers (torus -- no offsets)
+# ---------------------------------------------------------------------------
+
+def _cell_to_idx(q: int, r: int) -> int:
+    return q * BOARD_SIZE + r
+
+
+def _idx_to_cell(idx: int) -> tuple[int, int]:
+    return idx // BOARD_SIZE, idx % BOARD_SIZE
 
 
 # ---------------------------------------------------------------------------
@@ -72,372 +151,563 @@ class MCTSTree:
 # ---------------------------------------------------------------------------
 
 def _get_candidates(board: dict) -> set[tuple[int, int]]:
-    """Return empty cells within hex-distance 2 of any occupied cell."""
-    candidates = set()
-    for q, r in board:
-        for dq, dr in _D2_OFFSETS:
-            nb = (q + dq, r + dr)
-            if nb not in board:
-                candidates.add(nb)
-    return candidates
-
-
-def _cell_to_idx(q: int, r: int, off_q: int, off_r: int, w: int) -> int:
-    return (q + off_q) * w + (r + off_r)
-
-
-def _idx_to_cell(idx: int, off_q: int, off_r: int, w: int) -> tuple[int, int]:
-    return idx // w - off_q, idx % w - off_r
-
-
-def _valid_idx(q: int, r: int, off_q: int, off_r: int, h: int, w: int) -> bool:
-    gq, gr = q + off_q, r + off_r
-    return 0 <= gq < h and 0 <= gr < w
+    """Return all empty cells on the torus."""
+    return _ALL_CELLS - board.keys()
 
 
 # ---------------------------------------------------------------------------
-# PUCT
+# PUCT (vectorized)
 # ---------------------------------------------------------------------------
 
-def _puct_select(node: MCTSNode, c: float = PUCT_C) -> int:
-    """Select child with highest PUCT score. Returns action index."""
-    best_score = -float("inf")
-    best_action = -1
-    sqrt_parent = math.sqrt(node.visit_count)
+def _puct_select_py(node: MCTSNode, c: float = PUCT_C) -> int:
+    """Select child with highest PUCT score. Pure Python fallback."""
+    c_sqrt = c * math.sqrt(node.visit_count)
+    best = -1e30
+    best_a = -1
+    actions = node.actions
+    priors = node.priors
+    visits = node.visits
+    values = node.values
+    if node._has_terminal:
+        terminals = node.terminals
+        term_vals = node.term_vals
+        for i in range(node.n):
+            vc = visits[i]
+            if terminals[i]:
+                q = term_vals[i]
+            elif vc > 0:
+                q = values[i] / vc
+            else:
+                q = 0.0
+            s = q + c_sqrt * priors[i] / (1 + vc)
+            if s > best:
+                best = s
+                best_a = actions[i]
+    else:
+        for i in range(node.n):
+            vc = visits[i]
+            q = values[i] / vc if vc > 0 else 0.0
+            s = q + c_sqrt * priors[i] / (1 + vc)
+            if s > best:
+                best = s
+                best_a = actions[i]
+    return best_a
 
-    for action, child in node.children.items():
-        if child.is_terminal:
-            q_val = child.terminal_value
-        elif child.visit_count == 0:
-            q_val = 0.0
-        else:
-            q_val = child.value_sum / child.visit_count
-        score = q_val + c * child.prior * sqrt_parent / (1 + child.visit_count)
-        if score > best_score:
-            best_score = score
-            best_action = action
-    return best_action
+
+# Use Cython version if available, else fall back to Python
+try:
+    from learned_eval._puct_cy import puct_select as _puct_select
+except ImportError:
+    _puct_select = _puct_select_py
 
 
 # ---------------------------------------------------------------------------
 # Dirichlet noise
 # ---------------------------------------------------------------------------
 
-def _add_dirichlet_noise(node: MCTSNode, alpha: float = 0.3, frac: float = 0.25):
-    """Add Dirichlet noise to priors of node's children (in-place)."""
-    if not node.children:
+def _add_exploration_noise(node: MCTSNode, alpha: float = DIRICHLET_ALPHA,
+                           frac: float = DIRICHLET_FRAC):
+    """Add Dirichlet noise to priors (standard AlphaZero).
+
+    final_prior = (1 - frac) * prior + frac * Dir(alpha)
+    No uniform noise -- it scatters stones across the board in games
+    where play should be clustered (gomoku, hex, connect-6).
+    """
+    if node.actions is None:
         return
-    actions = list(node.children.keys())
-    noise = np.random.dirichlet([alpha] * len(actions))
-    for a, n in zip(actions, noise):
-        child = node.children[a]
-        child.prior = (1 - frac) * child.prior + frac * n
+    n = node.n
+    dirichlet = np.random.dirichlet([alpha] * n)
+    keep = 1.0 - frac
+    priors = node.priors
+    node.priors = [keep * priors[i] + frac * dirichlet[i]
+                   for i in range(n)]
 
 
 # ---------------------------------------------------------------------------
-# Core MCTS operations
+# Undo helper
+# ---------------------------------------------------------------------------
+
+def _undo_all(game, states: list):
+    """Undo all moves in reverse order."""
+    for q, r, state in reversed(states):
+        game.undo_move(q, r, state)
+
+
+# ---------------------------------------------------------------------------
+# Tree construction
 # ---------------------------------------------------------------------------
 
 def _build_tree_from_eval(
-    game: HexGame,
+    game,
     root_value: float,
     pair_probs: torch.Tensor,
     marginal: torch.Tensor,
     root_planes: torch.Tensor,
-    off_q: int, off_r: int, h: int, w: int,
     add_noise: bool = True,
 ) -> MCTSTree:
-    """Build an MCTSTree from pre-computed NN outputs (no model call)."""
-    board = game.board
-    root = MCTSNode()
+    """Build an MCTSTree from pre-computed NN outputs (no model call).
 
-    # Candidates for stone_1: empty cells near occupied
+    Uses ALL empty cells as stone_1 candidates (no top-K pruning).
+    """
+    board = game.board
+    pos = PosNode()
+    pos.value = root_value
+    pos.player = game.current_player
+    pos.is_root = True
+    pos._marginal = marginal
+
     if board:
         cands = _get_candidates(board)
     else:
-        cands = {(0, 0)}
+        cands = {(BOARD_SIZE // 2, BOARD_SIZE // 2)}
 
-    # Filter to valid grid indices and get priors
-    cand_priors = []
-    for q, r in cands:
-        if _valid_idx(q, r, off_q, off_r, h, w):
-            idx = _cell_to_idx(q, r, off_q, off_r, w)
-            cand_priors.append((idx, marginal[idx].item()))
-
-    # Top-K by prior
+    # Vectorized: one tensor index + one .tolist() instead of N .item() calls
+    cand_indices = [_cell_to_idx(q, r) for q, r in cands]
+    cand_values = marginal[cand_indices].tolist()
+    cand_priors = list(zip(cand_indices, cand_values))
     cand_priors.sort(key=lambda x: x[1], reverse=True)
-    top_cands = cand_priors[:TOP_K]
 
-    total_prior = sum(p for _, p in top_cands)
-    if total_prior > 0:
-        for idx, p in top_cands:
-            root.children[idx] = MCTSNode(prior=p / total_prior)
-    else:
-        for idx, _ in top_cands:
-            root.children[idx] = MCTSNode(prior=1.0 / len(top_cands))
+    _init_node_children(pos.move_node, cand_priors)
 
     if add_noise:
-        _add_dirichlet_noise(root)
+        _add_exploration_noise(pos.move_node)
 
     return MCTSTree(
-        root=root,
+        root_pos=pos,
         pair_probs=pair_probs,
-        marginal_probs=marginal,
         root_planes=root_planes,
         root_player=game.current_player,
-        off_q=off_q, off_r=off_r, h=h, w=w,
         root_value=root_value,
+        root_occupied=frozenset(board.keys()),
     )
 
 
 def create_tree(
-    game: HexGame,
+    game,
     model: torch.nn.Module,
     device: torch.device,
     add_noise: bool = True,
 ) -> MCTSTree:
     """Create a single MCTS tree with one B=1 NN forward pass."""
-    from learned_eval.resnet_model import board_to_planes
+    from learned_eval.resnet_model import board_to_planes_torus
 
-    planes, off_q, off_r, h, w = board_to_planes(
-        game.board, game.current_player)
-    N = h * w
+    planes = board_to_planes_torus(game.board, game.current_player)
 
     x = planes.unsqueeze(0).to(device)
-    mask = torch.ones(1, 1, h, w, device=device)
     with torch.no_grad():
-        value, pair_logits = model(x, mask)
+        value, pair_logits, _, _ = model(x)
 
     root_value = value[0].item()
-    pair_probs = F.softmax(pair_logits[0].reshape(-1), dim=0).reshape(N, N).cpu()
+    pair_probs = F.softmax(pair_logits[0].reshape(-1), dim=0).reshape(
+        N_CELLS, N_CELLS).cpu()
     marginal = pair_probs.sum(dim=-1)
 
     return _build_tree_from_eval(
-        game, root_value, pair_probs, marginal, planes,
-        off_q, off_r, h, w, add_noise)
+        game, root_value, pair_probs, marginal, planes, add_noise)
 
 
 @torch.no_grad()
 def create_trees_batched(
-    games: list[HexGame],
+    games: list,
     model: torch.nn.Module,
     device: torch.device,
     add_noise: bool = True,
 ) -> list[MCTSTree]:
     """Create trees for multiple games in one batched forward pass."""
-    from learned_eval.resnet_model import board_to_planes
+    from learned_eval.resnet_model import board_to_planes_torus
 
     B = len(games)
     if B == 0:
         return []
 
-    # Build planes and find max dims for padding
-    planes_list = []
-    offsets = []
-    for game in games:
-        planes, off_q, off_r, h, w = board_to_planes(
-            game.board, game.current_player)
-        planes_list.append(planes)
-        offsets.append((off_q, off_r, h, w))
-
-    max_h = max(h for _, _, h, _ in offsets)
-    max_w = max(w for _, _, _, w in offsets)
-
-    batch = torch.zeros(B, 2, max_h, max_w)
-    mask = torch.zeros(B, 1, max_h, max_w)
-    for i, (planes, (_, _, h, w)) in enumerate(zip(planes_list, offsets)):
-        batch[i, :, :h, :w] = planes
-        mask[i, 0, :h, :w] = 1.0
+    # All boards are fixed size -- just stack
+    batch = torch.zeros(B, 2, BOARD_SIZE, BOARD_SIZE)
+    for i, game in enumerate(games):
+        batch[i] = board_to_planes_torus(game.board, game.current_player)
 
     batch = batch.to(device)
-    mask = mask.to(device)
-    values, pair_logits = model(batch, mask)
+    values, pair_logits, _, _ = model(batch)
 
-    N = max_h * max_w
     trees = []
     for i, game in enumerate(games):
         root_value = values[i].item()
-        pp = F.softmax(pair_logits[i].reshape(-1), dim=0).reshape(N, N).cpu()
+        pp = F.softmax(pair_logits[i].reshape(-1), dim=0).reshape(
+            N_CELLS, N_CELLS).cpu()
         mg = pp.sum(dim=-1)
-        off_q, off_r, h, w = offsets[i]
-        # Store padded planes (max_h × max_w) so delta eval works on uniform grid
-        root_planes = batch[i].cpu()
         tree = _build_tree_from_eval(
-            game, root_value, pp, mg, root_planes, off_q, off_r, h, w,
-            add_noise)
+            game, root_value, pp, mg, batch[i].cpu(), add_noise)
         trees.append(tree)
 
     return trees
 
 
+# ---------------------------------------------------------------------------
+# Level-2 expansion (root only)
+# ---------------------------------------------------------------------------
+
 def _expand_level2(
     tree: MCTSTree,
-    parent_node: MCTSNode,
+    pos: PosNode,
     stone1_idx: int,
-    game: HexGame,
+    game,
     add_noise: bool = True,
-):
-    """Expand level-2 children for a stone_1 node using cached pair_probs."""
-    off_q, off_r, h, w = tree.off_q, tree.off_r, tree.h, tree.w
-    stone1_q, stone1_r = _idx_to_cell(stone1_idx, off_q, off_r, w)
+) -> MCTSNode | None:
+    """Expand level-2 children for a stone_1 action at root.
 
-    # Conditional priors: pair_probs[stone1_idx, :]
-    cond_probs = tree.pair_probs[stone1_idx]  # [N]
+    Uses tree.pair_probs for conditional priors.  ALL remaining empty cells
+    are candidates.
+    """
+    cond_probs = tree.pair_probs[stone1_idx]  # [N_CELLS]
 
-    # Candidates: empty cells near occupied + neighbors of stone_1
-    board = game.board
-    cands = _get_candidates(board) if board else set()
-    # Add neighbors of stone_1
-    for dq, dr in _D2_OFFSETS:
-        nb = (stone1_q + dq, stone1_r + dr)
-        if nb not in board:
-            cands.add(nb)
-    # Remove stone_1 itself
-    cands.discard((stone1_q, stone1_r))
+    # All empty cells except stone_1
+    cands = _get_candidates(game.board)
+    cands.discard(_idx_to_cell(stone1_idx))
 
-    cand_priors = []
-    for q, r in cands:
-        if _valid_idx(q, r, off_q, off_r, h, w):
-            idx = _cell_to_idx(q, r, off_q, off_r, w)
-            if idx != stone1_idx:
-                cand_priors.append((idx, cond_probs[idx].item()))
-
+    # Vectorized: one tensor index + one .tolist() instead of N .item() calls
+    cand_indices = [_cell_to_idx(q, r) for q, r in cands]
+    cand_values = cond_probs[cand_indices].tolist()
+    cand_priors = list(zip(cand_indices, cand_values))
     cand_priors.sort(key=lambda x: x[1], reverse=True)
-    top_cands = cand_priors[:TOP_K]
 
-    total_prior = sum(p for _, p in top_cands)
-    if total_prior > 0:
-        for idx, p in top_cands:
-            parent_node.children[idx] = MCTSNode(prior=p / total_prior)
-    elif top_cands:
-        for idx, _ in top_cands:
-            parent_node.children[idx] = MCTSNode(prior=1.0 / len(top_cands))
+    if not cand_priors:
+        return None
+
+    l2_node = MCTSNode()
+    _init_node_children(l2_node, cand_priors)
 
     if add_noise:
-        _add_dirichlet_noise(parent_node)
+        _add_exploration_noise(l2_node)
+
+    if pos.move_node.level2 is None:
+        pos.move_node.level2 = {}
+    pos.move_node.level2[stone1_idx] = l2_node
+    return l2_node
 
 
-def select_leaf(tree: MCTSTree, game: HexGame) -> LeafInfo:
-    """Select a leaf node via PUCT at both levels.
+# ---------------------------------------------------------------------------
+# Select leaf (multi-ply)
+# ---------------------------------------------------------------------------
 
-    Makes temporary moves on the game, then undoes them.
-    Returns LeafInfo with the board state for NN eval (or terminal info).
-    path stores (parent_node, child_array_index) for backprop.
+def select_leaf(tree: MCTSTree, game) -> LeafInfo:
+    """Select a leaf via PUCT, descending through child PosNodes.
+
+    Root (two-level): PUCT stone_1 then PUCT stone_2, check child.
+    Non-root (flat):  PUCT selects a complete encoded pair, check child.
+    Makes temporary moves on the game, undoes all before returning.
     """
-    path = []
-    off_q, off_r, w = tree.off_q, tree.off_r, tree.w
+    path: list[tuple[MCTSNode, int]] = []
+    pair_depths: list[int] = []
+    states: list[tuple[int, int, object]] = []
+    deltas: list[tuple[int, int, int]] = []
+    pos = tree.root_pos
+    depth = 0
     root_cp = tree.root_player
 
-    # Level 1: select stone_1
-    s1_idx = _puct_select(tree.root)
-    s1_node = tree.root.children[s1_idx]
-    s1_q = s1_idx // w - off_q
-    s1_r = s1_idx % w - off_r
+    while depth < MAX_DEPTH:
+        if pos.is_root:
+            # ---- Root: two-level (stone_1 -> stone_2) ----
 
-    path.append((tree.root, s1_idx))
+            # Level 1: select stone_1
+            s1_idx = _puct_select(pos.move_node)
+            s1_q, s1_r = _idx_to_cell(s1_idx)
 
-    # Make stone_1 move
-    state1 = game.save_state()
-    game.make_move(s1_q, s1_r)
+            path.append((pos.move_node, s1_idx))
+            pair_depths.append(depth)
 
-    # Check terminal after stone_1
-    if game.game_over:
-        game.undo_move(s1_q, s1_r, state1)
-        s1_node.is_terminal = True
-        s1_node.terminal_value = 1.0
-        return LeafInfo(path=path, is_terminal=True, terminal_value=1.0)
+            state = game.save_state()
+            states.append((s1_q, s1_r, state))
+            game.make_move(s1_q, s1_r)
 
-    # stone_1 grid coords for delta
-    s1_gq, s1_gr = s1_q + off_q, s1_r + off_r
-    deltas = [(s1_gq, s1_gr, 0)]
+            ch = depth % 2
+            deltas.append((s1_q, s1_r, ch))
 
-    # If turn ended after stone_1 (first-move-of-game case)
-    if game.moves_left_in_turn == 0:
-        cp = game.current_player
-        game.undo_move(s1_q, s1_r, state1)
-        return LeafInfo(
-            path=path, current_player=cp, is_terminal=False,
-            deltas=deltas, player_flipped=(cp != root_cp),
-        )
+            # Terminal after stone_1?
+            if game.game_over:
+                local = pos.move_node.action_map[s1_idx]
+                pos.move_node.terminals[local] = True
+                pos.move_node.term_vals[local] = 1.0
+                pos.move_node._has_terminal = True
+                _undo_all(game, states)
+                return LeafInfo(path=path, pair_depths=pair_depths,
+                                is_terminal=True, terminal_value=1.0)
 
-    # Expand level-2 if needed
-    if not s1_node.children:
-        _expand_level2(tree, s1_node, s1_idx, game, add_noise=False)
+            # Single-move turn (first move of game)?
+            if game.moves_left_in_turn == 0:
+                cp = game.current_player
+                _undo_all(game, states)
+                return LeafInfo(
+                    path=path, pair_depths=pair_depths,
+                    current_player=cp, deltas=deltas,
+                    player_flipped=(cp != root_cp))
 
-    if not s1_node.children:
-        cp = game.current_player
-        game.undo_move(s1_q, s1_r, state1)
-        return LeafInfo(
-            path=path, current_player=cp, is_terminal=False,
-            deltas=deltas, player_flipped=(cp != root_cp),
-        )
+            # Level 2: expand lazily, select stone_2
+            l2_node = (pos.move_node.level2 or {}).get(s1_idx)
+            if l2_node is None:
+                l2_node = _expand_level2(
+                    tree, pos, s1_idx, game, add_noise=(depth == 0))
 
-    # Level 2: select stone_2
-    s2_idx = _puct_select(s1_node)
-    s2_node = s1_node.children[s2_idx]
-    s2_q = s2_idx // w - off_q
-    s2_r = s2_idx % w - off_r
+            if l2_node is None or l2_node.actions is None:
+                cp = game.current_player
+                _undo_all(game, states)
+                return LeafInfo(
+                    path=path, pair_depths=pair_depths,
+                    current_player=cp, deltas=deltas,
+                    player_flipped=(cp != root_cp))
 
-    path.append((s1_node, s2_idx))
+            s2_idx = _puct_select(l2_node)
+            s2_q, s2_r = _idx_to_cell(s2_idx)
 
-    # Make stone_2 move
-    state2 = game.save_state()
-    game.make_move(s2_q, s2_r)
+            path.append((l2_node, s2_idx))
+            pair_depths.append(depth)
 
-    # Check terminal after stone_2
-    if game.game_over:
-        game.undo_move(s2_q, s2_r, state2)
-        game.undo_move(s1_q, s1_r, state1)
-        s2_node.is_terminal = True
-        s2_node.terminal_value = 1.0
-        return LeafInfo(path=path, is_terminal=True, terminal_value=1.0)
+            state = game.save_state()
+            states.append((s2_q, s2_r, state))
+            game.make_move(s2_q, s2_r)
+            deltas.append((s2_q, s2_r, ch))
 
-    # stone_2 delta
-    s2_gq, s2_gr = s2_q + off_q, s2_r + off_r
-    deltas.append((s2_gq, s2_gr, 0))
+            # Terminal after stone_2?
+            if game.game_over:
+                local = l2_node.action_map[s2_idx]
+                l2_node.terminals[local] = True
+                l2_node.term_vals[local] = 1.0
+                l2_node._has_terminal = True
+                _undo_all(game, states)
+                return LeafInfo(path=path, pair_depths=pair_depths,
+                                is_terminal=True, terminal_value=1.0)
 
+            # Check for child PosNode
+            pair_key = (s1_idx, s2_idx)
+            child = (pos.children or {}).get(pair_key)
+
+            if child is not None:
+                pos = child
+                depth += 1
+                continue
+
+            # Leaf -- check expansion threshold
+            local_s2 = l2_node.action_map[s2_idx]
+            needs_exp = (l2_node.visits[local_s2] + 1 >= EXPAND_VISITS)
+
+            cp = game.current_player
+            _undo_all(game, states)
+            return LeafInfo(
+                path=path, pair_depths=pair_depths,
+                current_player=cp, deltas=deltas,
+                player_flipped=(cp != root_cp),
+                needs_expansion=needs_exp,
+                expand_parent=pos, expand_pair=pair_key)
+
+        else:
+            # ---- Non-root: flat pair selection ----
+
+            pair_action = _puct_select(pos.move_node)
+            s1_idx = pair_action // N_CELLS
+            s2_idx = pair_action % N_CELLS
+            s1_q, s1_r = _idx_to_cell(s1_idx)
+            s2_q, s2_r = _idx_to_cell(s2_idx)
+
+            path.append((pos.move_node, pair_action))
+            pair_depths.append(depth)
+
+            ch = depth % 2
+
+            # Make stone_1
+            state = game.save_state()
+            states.append((s1_q, s1_r, state))
+            game.make_move(s1_q, s1_r)
+            deltas.append((s1_q, s1_r, ch))
+
+            if game.game_over:
+                local = pos.move_node.action_map[pair_action]
+                pos.move_node.terminals[local] = True
+                pos.move_node.term_vals[local] = 1.0
+                pos.move_node._has_terminal = True
+                _undo_all(game, states)
+                return LeafInfo(path=path, pair_depths=pair_depths,
+                                is_terminal=True, terminal_value=1.0)
+
+            # Make stone_2
+            state = game.save_state()
+            states.append((s2_q, s2_r, state))
+            game.make_move(s2_q, s2_r)
+            deltas.append((s2_q, s2_r, ch))
+
+            if game.game_over:
+                local = pos.move_node.action_map[pair_action]
+                pos.move_node.terminals[local] = True
+                pos.move_node.term_vals[local] = 1.0
+                pos.move_node._has_terminal = True
+                _undo_all(game, states)
+                return LeafInfo(path=path, pair_depths=pair_depths,
+                                is_terminal=True, terminal_value=1.0)
+
+            # Check for child PosNode
+            child = (pos.children or {}).get(pair_action)
+
+            if child is not None:
+                pos = child
+                depth += 1
+                continue
+
+            # Leaf -- check expansion threshold
+            local_pair = pos.move_node.action_map[pair_action]
+            needs_exp = (pos.move_node.visits[local_pair] + 1 >= EXPAND_VISITS)
+
+            cp = game.current_player
+            _undo_all(game, states)
+            return LeafInfo(
+                path=path, pair_depths=pair_depths,
+                current_player=cp, deltas=deltas,
+                player_flipped=(cp != root_cp),
+                needs_expansion=needs_exp,
+                expand_parent=pos, expand_pair=pair_action)
+
+    # MAX_DEPTH reached
     cp = game.current_player
-
-    # Undo both moves
-    game.undo_move(s2_q, s2_r, state2)
-    game.undo_move(s1_q, s1_r, state1)
-
+    _undo_all(game, states)
     return LeafInfo(
-        path=path, current_player=cp, is_terminal=False,
-        deltas=deltas, player_flipped=(cp != root_cp),
-    )
+        path=path, pair_depths=pair_depths,
+        current_player=cp, deltas=deltas,
+        player_flipped=(cp != root_cp))
 
+
+# ---------------------------------------------------------------------------
+# Backprop (multi-ply)
+# ---------------------------------------------------------------------------
 
 def expand_and_backprop(
     tree: MCTSTree,
     leaf: LeafInfo,
     nn_value: float,
 ):
-    """Backpropagate a value through the path.
+    """Backpropagate a value through the multi-ply path.
 
-    nn_value is from the opponent's perspective (the NN evaluates the leaf
-    position where it's the opponent's turn). Negate to get our perspective.
+    Sign alternates at pair boundaries: within a pair both entries get the
+    same sign; across pair boundaries the sign flips.
+
+    value_for_mover = the value from the perspective of whoever placed the
+    last stone in the path.
+      - terminal: terminal_value (1.0 = that player won)
+      - non-terminal: -nn_value (nn evaluates from NEXT player's perspective)
+
+    For path entry at pair_depth k with deepest pair_depth d:
+      sign = +1 if (d-k) even, -1 if odd.
     """
     if leaf.is_terminal:
-        value = leaf.terminal_value
+        value_for_mover = leaf.terminal_value
     else:
-        value = -nn_value  # flip: opponent's eval → our perspective
+        value_for_mover = -nn_value
 
-    # Backprop along path
-    for parent_node, action_idx in leaf.path:
-        child = parent_node.children[action_idx]
-        child.visit_count += 1
-        child.value_sum += value
-    tree.root.visit_count += 1
+    if not leaf.path:
+        return
 
+    d = leaf.pair_depths[-1]
+
+    for (node, action_idx), k in zip(leaf.path, leaf.pair_depths):
+        sign = 1 if (d - k) % 2 == 0 else -1
+
+        local = node.action_map[action_idx]
+        node.visits[local] += 1
+        node.values[local] += sign * value_for_mover
+        node.visit_count += 1
+
+
+# ---------------------------------------------------------------------------
+# Child PosNode expansion
+# ---------------------------------------------------------------------------
+
+def maybe_expand_leaf(
+    tree: MCTSTree,
+    leaf: LeafInfo,
+    marginal: torch.Tensor,
+    top_pair_indices: torch.Tensor,
+    top_pair_values: torch.Tensor,
+):
+    """Create a child PosNode at the leaf if expansion conditions are met.
+
+    Args:
+        marginal: [N_CELLS] marginalized priors for the leaf position.
+        top_pair_indices: [K] indices into flattened N*N pair probs.
+        top_pair_values: [K] corresponding probabilities.
+    """
+    if not leaf.needs_expansion or leaf.is_terminal:
+        return
+    if leaf.expand_parent is None:
+        return
+
+    parent = leaf.expand_parent
+    pair_key = leaf.expand_pair
+
+    # Guard against double-expansion
+    if parent.children is not None and pair_key in parent.children:
+        return
+
+    # Occupied cells at leaf position
+    occupied_idx = {_cell_to_idx(q, r) for q, r in tree.root_occupied}
+    for q, r, _ch in leaf.deltas:
+        occupied_idx.add(_cell_to_idx(q, r))
+
+    # Filter top pairs: exclude occupied cells, self-pairs
+    actions_priors = []
+    for idx_val, prob_val in zip(top_pair_indices.tolist(),
+                                 top_pair_values.tolist()):
+        s1 = idx_val // N_CELLS
+        s2 = idx_val % N_CELLS
+        if s1 == s2 or s1 in occupied_idx or s2 in occupied_idx:
+            continue
+        actions_priors.append((idx_val, prob_val))
+        if len(actions_priors) >= NON_ROOT_TOP_K:
+            break
+
+    if not actions_priors:
+        return
+
+    child = PosNode()
+    child.player = leaf.current_player
+    child.is_root = False
+    child._marginal = marginal
+
+    _init_node_children(child.move_node, actions_priors)
+    # No exploration noise at non-root
+
+    if parent.children is None:
+        parent.children = {}
+    parent.children[pair_key] = child
+
+
+# ---------------------------------------------------------------------------
+# Visit extraction and move selection (root only)
+# ---------------------------------------------------------------------------
 
 def get_pair_visits(tree: MCTSTree) -> dict[tuple[int, int], int]:
-    """Collect visit counts for (stone1_idx, stone2_idx) pairs."""
+    """Collect visit counts for (stone1_idx, stone2_idx) pairs at root."""
     visits = {}
-    for s1_idx, s1_node in tree.root.children.items():
-        for s2_idx, s2_node in s1_node.children.items():
-            if s2_node.visit_count > 0:
-                visits[(s1_idx, s2_idx)] = s2_node.visit_count
+    root = tree.root_pos.move_node
+    if root.actions is None or root.level2 is None:
+        return visits
+    for i in range(root.n):
+        s1_idx = root.actions[i]
+        l2 = root.level2.get(s1_idx)
+        if l2 is None or l2.actions is None:
+            continue
+        for j in range(l2.n):
+            vc = l2.visits[j]
+            if vc > 0:
+                visits[(s1_idx, l2.actions[j])] = vc
+    return visits
+
+
+def get_single_visits(tree: MCTSTree) -> dict[tuple[int, int], int]:
+    """Get visit counts for single-move case (pairs with same stone)."""
+    visits = {}
+    root = tree.root_pos.move_node
+    if root.actions is None:
+        return visits
+    for i in range(root.n):
+        vc = root.visits[i]
+        if vc > 0:
+            a = root.actions[i]
+            visits[(a, a)] = vc
     return visits
 
 
@@ -447,19 +717,19 @@ def select_move_pair(
 ) -> tuple[tuple[int, int], tuple[int, int]]:
     """Select a (stone1, stone2) move pair based on visit counts.
 
-    Returns ((q1,r1), (q2,r2)).
+    Returns ((q1,r1), (q2,r2)) in torus coordinates.
     """
     pair_visits = get_pair_visits(tree)
     if not pair_visits:
         # Fallback: best stone_1 by visits
-        best_s1 = max(tree.root.children,
-                      key=lambda a: tree.root.children[a].visit_count)
-        s1_cell = _idx_to_cell(best_s1, tree.off_q, tree.off_r, tree.w)
-        s1_node = tree.root.children[best_s1]
-        if s1_node.children:
-            best_s2 = max(s1_node.children,
-                          key=lambda a: s1_node.children[a].visit_count)
-            s2_cell = _idx_to_cell(best_s2, tree.off_q, tree.off_r, tree.w)
+        root = tree.root_pos.move_node
+        best_local = max(range(root.n), key=lambda i: root.visits[i])
+        best_s1 = root.actions[best_local]
+        s1_cell = _idx_to_cell(best_s1)
+        l2 = root.level2.get(best_s1) if root.level2 else None
+        if l2 is not None and l2.actions is not None:
+            best_l2 = max(range(l2.n), key=lambda i: l2.visits[i])
+            s2_cell = _idx_to_cell(l2.actions[best_l2])
         else:
             s2_cell = s1_cell
         return s1_cell, s2_cell
@@ -475,13 +745,13 @@ def select_move_pair(
         best_idx = torch.multinomial(probs, 1).item()
 
     s1_idx, s2_idx = pairs[best_idx]
-    s1_cell = _idx_to_cell(s1_idx, tree.off_q, tree.off_r, tree.w)
-    s2_cell = _idx_to_cell(s2_idx, tree.off_q, tree.off_r, tree.w)
+    s1_cell = _idx_to_cell(s1_idx)
+    s2_cell = _idx_to_cell(s2_idx)
     return s1_cell, s2_cell
 
 
 def select_single_move(tree: MCTSTree) -> tuple[int, int]:
     """Select a single move (for moves_left == 1) from marginalized visits."""
-    best_s1 = max(tree.root.children,
-                  key=lambda a: tree.root.children[a].visit_count)
-    return _idx_to_cell(best_s1, tree.off_q, tree.off_r, tree.w)
+    root = tree.root_pos.move_node
+    best_local = max(range(root.n), key=lambda i: root.visits[i])
+    return _idx_to_cell(root.actions[best_local])
