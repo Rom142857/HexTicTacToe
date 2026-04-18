@@ -5,7 +5,7 @@ def bot(current_player,board,remaining):
       for i in board:
         if board[i]!=player:
           continue
-        for j in ((1,0,0),(0,1,1),(1,-1,2)):
+        for j in ((1,0),(0,1),(1,-1)):
           for k in range(5):
             pos=list(i)
             pos[0]-=j[0]*k
