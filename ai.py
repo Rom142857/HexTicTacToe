@@ -1,3 +1,4 @@
+from random import *
 def bot(current_player,board,remaining):
     scores={}
     for player in (-current_player,current_player):
