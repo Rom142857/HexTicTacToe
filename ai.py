@@ -67,3 +67,4 @@ class MyBot(Bot):
     def get_move(self, game):
         if not game.board:
             return (0, 0)
+        return bot(self.current_player,self.board,self.moves_left_in_turn)
