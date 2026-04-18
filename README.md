@@ -32,8 +32,6 @@ Run `play.py` to launch the game GUI. You play as **Player A** (red) against the
 - **R** — restart the game
 - **Q** — quit
 
-The AI thinks for up to 0.5 seconds per move using iterative-deepening minimax with a transposition table.
-
 ## Project Structure
 
 | File | Description |
@@ -41,9 +39,7 @@ The AI thinks for up to 0.5 seconds per move using iterative-deepening minimax w
 | `play.py` | **Main entry point** — Pygame GUI for playing against the AI |
 | `game.py` | Game rules, board state, move/undo, win detection |
 | `bot.py` | Abstract `Bot` base class and `RandomBot` |
-| `ai.py` | AI bot: minimax search, alpha-beta pruning, heuristic evaluation |
-| `evaluate.py` | Head-to-head bot evaluation framework (parallel games) |
-| `run_eval.py` | CLI wrapper to run bot-vs-bot evaluations |
+| `ai.py` | AI bot |
 
 ## Requirements
 
