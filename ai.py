@@ -1,7 +1,7 @@
 from random import *
 def bot(current_player,board,remaining):
     scores={}
-    for player in (-current_player,current_player):
+    for player in (3-current_player,current_player):
       for i in board:
         if board[i]!=player:
           continue
