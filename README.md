@@ -1,6 +1,6 @@
 # Hex Tic-Tac-Toe
 
-A hexagonal variant of Tic-Tac-Toe (Connect6 on a hex grid) with an AI opponent powered by minimax search with alpha-beta pruning.
+A hexagonal variant of Tic-Tac-Toe (Connect6 on a hex grid) with an AI opponent.
 
 ## Game Rules
 
