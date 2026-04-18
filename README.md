@@ -13,7 +13,7 @@ A hexagonal variant of Tic-Tac-Toe (Connect6 on a hex grid) with an AI opponent 
 
 ```bash
 # Clone the repo
-git clone https://github.com/Ramora0/HexTicTacToe.git
+git clone https://github.com/Rom142857/HexTicTacToe.git
 cd HexTicTacToe
 
 # Install dependencies
