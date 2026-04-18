@@ -265,8 +265,8 @@ def draw_board(screen, game, visible_cells, hover_hex, hex_size, ox, oy, fonts,
 
 def main():
     parser = argparse.ArgumentParser(description="Play Hex Tic-Tac-Toe against an AI bot.")
-    parser.add_argument("bot", nargs="?", default="og_ai",
-                        help="AI module name (default: og_ai)")
+    parser.add_argument("bot", nargs="?", default="ai",
+                        help="AI module name (default: ai)")
     parser.add_argument("--time-limit", type=float, default=0.5,
                         help="AI time limit per move in seconds (default: 0.5)")
     args = parser.parse_args()
@@ -285,7 +285,7 @@ def main():
     )
 
     game = HexGame(win_length=6)
-    ai = bot_mod.MinimaxBot(time_limit=args.time_limit)
+    ai = bot_mod.MyBot(time_limit=args.time_limit)
 
     human_player = Player.A
     hover_hex = None
